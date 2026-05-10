@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "id": "����ƶ��",
+    "name": "����Ƶ��",
+    "podcast_id": "626b46ea9cbbf0451cf5a962",
+    "url": "https://www.xiaoyuzhoufm.com/podcast/626b46ea9cbbf0451cf5a962",
+    "type": "podcast",
+    "default_transcribe_model": "whisper"
+  }
+]
