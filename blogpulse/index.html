@@ -1,0 +1,3404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BlogPulse - 博客/播客智能追踪</title>
+<style>body{margin:0;padding:0;background:#ffffff;overflow-x:hidden}#root{min-height:100vh}</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+if(!window.storage){window.storage={get:async(k)=>{const v=localStorage.getItem(k);return v?{value:v}:null},set:async(k,v)=>{localStorage.setItem(k,v)}}}
+</script>
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } = React;
+
+
+
+// ─── Design Tokens ───
+const C = {
+  bg: "#ffffff", surface: "#f5f6f8", card: "#ffffff", cardHover: "#f8f9fb",
+  border: "#e2e4e9", borderLight: "#d0d3da",
+  text: "#05070a", textSec: "#1e2127", textDim: "#6a6e78",      // textSec 从 #4a4e58 加深到 #1e2127；text 接近纯黑
+  textRead: "#8a8e98",                                            // 已读过状态的文字颜色
+  accent: "#1a8c3a", accentDark: "#15722f",
+  accentBg: "rgba(26,140,58,0.06)", accentBorder: "rgba(26,140,58,0.18)",
+  red: "#d93025", blue: "#1a73e8",
+  noteBg: "rgba(245,158,11,0.08)", noteBorder: "rgba(245,158,11,0.35)",
+};
+const fontEl = document.createElement("link");
+fontEl.rel = "stylesheet";
+fontEl.href = "https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap";
+document.head.appendChild(fontEl);
+const srf = "'Crimson Pro','Georgia',serif";
+const mno = "'JetBrains Mono',monospace";
+
+const STORE_KEY = "bp-data-v103";
+const logs = [];
+function dlog(m) { logs.push(`[${new Date().toLocaleTimeString()}] ${m}`); if (logs.length > 80) logs.shift(); console.log("[BP]", m); }
+
+// ─── Utils ───
+function timeAgo(ts) {
+  if (!ts) return "从未";
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return "刚刚"; if (m < 60) return `${m}分钟前`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}小时前`; return `${Math.floor(h / 24)}天前`;
+}
+function fmtTime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
+}
+function Spinner({ size = 16, color = C.accent }) {
+  return <span style={{ display: "inline-block", width: size, height: size, border: `2px solid ${C.border}`, borderTopColor: color, borderRadius: "50%", animation: "spin .7s linear infinite" }} />;
+}
+function PulseDot() {
+  return <span style={{ position: "relative", display: "inline-block", width: 8, height: 8 }}>
+    <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: C.accent, animation: "pulse 2s ease infinite" }} />
+    <span style={{ position: "absolute", inset: -3, borderRadius: "50%", background: C.accent, opacity: .25, animation: "pulseRing 2s ease infinite" }} />
+  </span>;
+}
+
+// ─── 自动分类用户更正（前端轻量规则 — 是否专有名词）───
+// 返回 {type, label, isProperNoun}
+function bpClassifyCorrection(corrected) {
+  const c = (corrected || "").trim();
+  if (!c) return { type: "unknown", label: "未知", isProperNoun: false };
+  if (/^[A-Z]{2,8}$/.test(c)) return { type: "acronym", label: "缩写", isProperNoun: true };
+  if (/^[A-Z][a-zA-Z][a-zA-Z0-9\-]{1,15}$/.test(c)) return { type: "company_or_product", label: "公司/产品", isProperNoun: true };
+  if (/^[A-Z][a-z]+(\s[A-Z][a-z]+)+$/.test(c)) return { type: "person_en", label: "英文人名", isProperNoun: true };
+  // 中文人名：2-4 字 + 常见姓氏首字
+  const surnames = "张李王赵陈刘黄周吴徐孙马朱胡郭何高林郑梁谢罗宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛阎段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤洪卫";
+  if (/^[一-龥]{2,4}$/.test(c) && surnames.includes(c[0])) return { type: "person_zh", label: "中文人名", isProperNoun: true };
+  if (/^[a-z][a-zA-Z\-]{2,30}$/.test(c)) return { type: "ai_term", label: "技术术语", isProperNoun: true };
+  if (/^[一-龥]{2,8}$/.test(c)) return { type: "chinese_term", label: "中文术语", isProperNoun: true };
+  if (c.length > 20) return { type: "phrase", label: "改写（不入名词库）", isProperNoun: false };
+  return { type: "unknown", label: "未识别（不入名词库）", isProperNoun: false };
+}
+
+// 给一段文本应用 corrections 列表（按 original 长度倒序，避免短词覆盖长词）
+function bpApplyCorrections(text, corrections) {
+  if (!text || !corrections || !corrections.length) return text;
+  let out = String(text);
+  const sorted = [...corrections].sort((a, b) => (b.original || "").length - (a.original || "").length);
+  for (const c of sorted) {
+    if (!c.original || !c.corrected || c.original === c.corrected) continue;
+    // 全局替换；JS 没有简单的 replaceAll-with-string-not-regex，需要 split+join
+    out = out.split(c.original).join(c.corrected);
+  }
+  return out;
+}
+
+// 在原字符串里数 occurrences（用于 modal 预览"还有 X 处"）
+function bpCountOccurrences(text, needle) {
+  if (!text || !needle) return 0;
+  return text.split(needle).length - 1;
+}
+
+// 给一段被选中的文字，在原文里找到它，并按 *...* 边界拆分为 atoms
+// 返回 [{italic: bool, text: str}, ...] — 让批注卡片可以按原文样式渲染
+// 不命中（找不到）→ 当作整段非斜体
+function bpSplitByItalicFromSource(needle, source) {
+  if (!needle || !source) return [{ italic: false, text: needle || "" }];
+  const trimmedNeedle = needle.replace(/\*/g, "");  // 已存的批注 text 已经 strip 过 *
+  if (!trimmedNeedle) return [{ italic: false, text: "" }];
+  // 在 source 里标记哪些字符在 *...* 里（按对配对）
+  const inItalic = new Array(source.length).fill(false);
+  let openAt = -1;
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === "*") {
+      if (openAt < 0) openAt = i;
+      else {
+        for (let j = openAt + 1; j < i; j++) inItalic[j] = true;
+        openAt = -1;
+      }
+    }
+  }
+  // 在 source 里查找 needle（去掉 * 之后比对）
+  // source 含 *，需要先生成无 * 版本 + 映射
+  const plainSource = [];
+  const plainToOrig = [];  // plainSource[k] = source[plainToOrig[k]]
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== "*") {
+      plainSource.push(source[i]);
+      plainToOrig.push(i);
+    }
+  }
+  const plainStr = plainSource.join("");
+  const idx = plainStr.indexOf(trimmedNeedle);
+  if (idx < 0) return [{ italic: false, text: trimmedNeedle }];
+  // 按需要的每个字符在原文里对应的位置查 inItalic
+  const atoms = [];
+  let curItalic = inItalic[plainToOrig[idx]];
+  let buf = "";
+  for (let k = idx; k < idx + trimmedNeedle.length; k++) {
+    const origPos = plainToOrig[k];
+    const it = inItalic[origPos];
+    if (it === curItalic) {
+      buf += plainStr[k];
+    } else {
+      if (buf) atoms.push({ italic: curItalic, text: buf });
+      curItalic = it;
+      buf = plainStr[k];
+    }
+  }
+  if (buf) atoms.push({ italic: curItalic, text: buf });
+  return atoms;
+}
+
+// ─── Rating System (bp_ namespace, 独立于 trump-tracker) ───
+// 评分维度：频道基础分（弱权重）+ 嘉宾 profile + 内容关键词
+// 已转录是必须项，不作为加分项；频道权重偏弱，主要靠嘉宾+关键词+你的打分/阅读/批注信号学习
+const BP_CHANNEL_WEIGHT = {
+  "张小珺Jùn｜商业访谈录": 2,              // 深度访谈，独角兽/顶级AI专家密度高
+  "硅谷101": 1,                              // 行业/科技分析
+  "卫诗婕｜漫谈Light the Star": 1,           // 行业访谈
+  "声东击西": 0,                              // 国际/综合话题，默认无基分
+};
+const BP_KEYWORDS = {
+  high: {
+    // 股票/行业分析强相关
+    words: ["英伟达","nvidia","台积电","tsmc","openai","anthropic","google","meta","tesla","特斯拉","微软","苹果","xai","字节","bytedance","阿里","腾讯","百度","英特尔","amd","gpu","芯片","半导体","模型公司","ipo","上市","融资","大模型","foundation model","world model","世界模型","推理","训练","post-train","robotics","机器人","具身","自动驾驶","autopilot","fsd","waymo","tpu","cuda","coding","agent","季报","财报","estimates","gtc","ai工厂","data center"],
+    base: 2,
+  },
+  mid: {
+    words: ["ai","人工智能","创业","创始人","ceo","投资","风险投资","vc","行业","战略","数据","算法","应用","产品","生态","llm","gpt","claude","gemini","multi-modal","出海","中美","竞争","垄断","监管","政策","基建","开源","闭源","scaling law","rl","强化学习","context","token"],
+    base: 1,
+  },
+};
+const BP_GUEST_TIER = {
+  // 顶级AI专家 / 独角兽创始人 / 世界级学者
+  top: ["谢赛宁","杨立昆","lecun","ilya","tristan","张筱帆","广密","田渊栋","李飞飞","fei-fei","梁文峰","杨植麟","张一鸣","马斯克","musk","karpathy","altman","dario","周鸿祎","曹旭东","高继扬","许华哲"],
+  // 知名CEO / 上市公司高管 / 资深投资人
+  high: ["谢晨","姚欣","季宇","张小珺","卫诗婕","alex karp","杨元庆","沈向洋","林达华","黄仁勋","huang","jensen"],
+};
+// ─── Auto-backup daemon mirror ───
+// 每次 BP_RATING_DB._set 都会 debounce 触发：
+//   1) 写一份滚动 snapshot 到 localStorage 的 bp_snap_history（保最近 20 份）
+//   2) POST 一份完整快照到本地守护进程 /backup（如果在线 → 每小时/每天分文件留档）
+// 这样 localStorage 被清掉时，本地 daemon 的 user_data_backups 文件夹仍有完整历史
+const BP_BACKUP = {
+  _timer: null,
+  _snapHistoryKey: "bp_snap_history",
+  _snapMax: 20, // 本地最多保留多少份滚动 snapshot
+  collectAll() {
+    // 收集所有 bp_ 前缀的 localStorage（user data）— 不包括 bp-data-v* 应用状态
+    const out = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("bp_") && k !== "bp_snap_history") {
+        out[k] = localStorage.getItem(k);
+      }
+    }
+    return out;
+  },
+  schedule() {
+    if (this._timer) clearTimeout(this._timer);
+    this._timer = setTimeout(() => this.flush(), 1500);
+  },
+  flush() {
+    const snapshot = this.collectAll();
+    const ts = Date.now();
+    // 1) 滚动本地 snapshot
+    try {
+      const hist = JSON.parse(localStorage.getItem(this._snapHistoryKey) || "[]");
+      hist.unshift({ ts, data: snapshot });
+      while (hist.length > this._snapMax) hist.pop();
+      localStorage.setItem(this._snapHistoryKey, JSON.stringify(hist));
+    } catch (e) { /* localStorage 满了就跳过本地 snapshot */ }
+    // 2) 发送到 daemon (本机) + Cloudflare /api/backup (跨机持久化、移动端可用)
+    const payload = JSON.stringify({ data: snapshot, ts });
+    try {
+      fetch("http://127.0.0.1:9878/backup", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: payload,
+      }).catch(() => {});
+    } catch {}
+    try {
+      fetch("/api/backup", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: payload,
+      }).catch(() => {});
+    } catch {}
+  },
+  getLocalHistory() {
+    try { return JSON.parse(localStorage.getItem(this._snapHistoryKey) || "[]"); }
+    catch { return []; }
+  },
+};
+
+const BP_RATING_DB = {
+  _get(k, def) { try { return JSON.parse(localStorage.getItem("bp_" + k)) || def; } catch(e) { return def; } },
+  _set(k, v) { try { localStorage.setItem("bp_" + k, JSON.stringify(v)); BP_BACKUP.schedule(); } catch(e) {} },
+  getUserRatings() { return this._get("user_ratings", {}); },
+  setUserRating(id, r) { const d = this.getUserRatings(); if (r > 0) d[id] = r; else delete d[id]; this._set("user_ratings", d); return d; },
+  getLearnedWeights() { return this._get("learned_weights", {}); },
+  saveLearnedWeights(w) { this._set("learned_weights", w); },
+  getRatingCount() { return Object.keys(this.getUserRatings()).length; },
+  // 已读过 — user-only marker
+  getReads() { return this._get("reads", {}); },
+  isRead(id) { return !!this.getReads()[id]; },
+  toggleRead(id) {
+    const d = this.getReads();
+    if (d[id]) { delete d[id]; }
+    else { d[id] = { readAt: Date.now() }; }
+    this._set("reads", d);
+    return !!d[id];
+  },
+  // 批注 — per-episode list of {id, text, note, created, updated}
+  getAnnotations(epId) { const all = this._get("annotations", {}); return all[epId] || []; },
+  saveAnnotations(epId, list) {
+    const all = this._get("annotations", {});
+    if (list && list.length) all[epId] = list; else delete all[epId];
+    this._set("annotations", all);
+  },
+  getAnnotationCharCount(epId) {
+    return this.getAnnotations(epId).reduce((sum, a) => sum + (a.note || "").length, 0);
+  },
+  // 单集请求队列 — 用户主动请求处理某一集（不 track 整个频道）
+  // 每条 { episode_id, url, title?, note?, status: "pending"|"done"|"failed", requested_at }
+  getPendingEpisodes() { return this._get("pending_episodes", []); },
+  savePendingEpisodes(list) { this._set("pending_episodes", list || []); },
+  addPendingEpisode(item) {
+    const list = this.getPendingEpisodes();
+    // 去重：同一个 episode_id 只保留最新
+    const filtered = list.filter(p => p.episode_id !== item.episode_id);
+    filtered.unshift(item);
+    this.savePendingEpisodes(filtered);
+    return filtered;
+  },
+  removePendingEpisode(episode_id) {
+    const list = this.getPendingEpisodes().filter(p => p.episode_id !== episode_id);
+    this.savePendingEpisodes(list);
+    return list;
+  },
+  // ─── 用户更正（per-episode 字符串替换 + 全局名词库种子）───
+  // 数据结构：{ ep_id: [ {original, corrected, type, ts, applied_count}, ... ] }
+  getCorrections(epId) {
+    const all = this._get("corrections", {});
+    return all[epId] || [];
+  },
+  addCorrection(epId, item) {
+    const all = this._get("corrections", {});
+    if (!all[epId]) all[epId] = [];
+    // 去重：同一个 (original,corrected) 对只保留最新
+    all[epId] = all[epId].filter(c => !(c.original === item.original && c.corrected === item.corrected));
+    all[epId].unshift({ ...item, ts: Date.now() });
+    this._set("corrections", all);
+    return all[epId];
+  },
+  getAllCorrections() {
+    return this._get("corrections", {});
+  },
+  // ─── 章节"更详细总结"展开 ───
+  // 数据结构: { ep_id: { chapter_key: { text, ts, model } } }
+  getExpansions(epId) {
+    const all = this._get("expansions", {});
+    return all[epId] || {};
+  },
+  setExpansion(epId, chapterKey, info) {
+    const all = this._get("expansions", {});
+    if (!all[epId]) all[epId] = {};
+    all[epId][chapterKey] = { ts: Date.now(), ...info };
+    this._set("expansions", all);
+    return all[epId];
+  },
+  removeExpansion(epId, chapterKey) {
+    const all = this._get("expansions", {});
+    if (all[epId]) {
+      delete all[epId][chapterKey];
+      if (!Object.keys(all[epId]).length) delete all[epId];
+      this._set("expansions", all);
+    }
+  },
+  // ─── 跨电脑 "+ 更详细总结" 任务队列 ───
+  // 副电脑（无 daemon）点击时写入；主电脑 daemon worker 拉取处理
+  // 数据结构: { ep_id: { chapter_key: { start_sec, end_sec, current_text, requested_at, status?: 'pending'|'processing'|'done'|'error' } } }
+  getExpandPending(epId) {
+    const all = this._get("expand_pending", {});
+    return all[epId] || {};
+  },
+  setExpandPending(epId, chapterKey, info) {
+    const all = this._get("expand_pending", {});
+    if (!all[epId]) all[epId] = {};
+    all[epId][chapterKey] = { requested_at: Date.now(), status: "pending", ...info };
+    this._set("expand_pending", all);
+    return all[epId];
+  },
+  removeExpandPending(epId, chapterKey) {
+    const all = this._get("expand_pending", {});
+    if (all[epId]) {
+      delete all[epId][chapterKey];
+      if (!Object.keys(all[epId]).length) delete all[epId];
+      this._set("expand_pending", all);
+    }
+  },
+  // ─── GPT-4o 重转录中状态 ───
+  // { ep_id: { ts, pid } }，30 分钟自动过期
+  getRetranscribing(epId) {
+    const all = this._get("retranscribing", {});
+    const entry = all[epId];
+    if (!entry) return null;
+    if (Date.now() - entry.ts > 30 * 60 * 1000) {
+      delete all[epId];
+      this._set("retranscribing", all);
+      return null;
+    }
+    return entry;
+  },
+  setRetranscribing(epId, info) {
+    const all = this._get("retranscribing", {});
+    all[epId] = { ts: Date.now(), ...info };
+    this._set("retranscribing", all);
+  },
+  clearRetranscribing(epId) {
+    const all = this._get("retranscribing", {});
+    delete all[epId];
+    this._set("retranscribing", all);
+  },
+  // ─── 备份/恢复 ───
+  exportAll() {
+    const out = BP_BACKUP.collectAll();
+    return { ts: Date.now(), iso: new Date().toISOString(), data: out };
+  },
+  importAll(payload, mode = "merge") {
+    // mode: "merge" → 仅在本地无该 key 时写入（永远不覆盖现有）
+    //       "replace" → 全部覆盖
+    //       "smart" → 评分/已读/批注 智能合并（按 epId 取并集）
+    if (!payload || !payload.data) return { written: 0, skipped: 0 };
+    let written = 0, skipped = 0;
+    if (mode === "smart") {
+      // smart merge：对常见复合 key 做按子键合并
+      const ratings = JSON.parse(payload.data.bp_user_ratings || "null") || {};
+      const reads = JSON.parse(payload.data.bp_reads || "null") || {};
+      const annotations = JSON.parse(payload.data.bp_annotations || "null") || {};
+      const pending = JSON.parse(payload.data.bp_pending_episodes || "null") || [];
+      const learned = JSON.parse(payload.data.bp_learned_weights || "null") || {};
+      const correctionsBak = JSON.parse(payload.data.bp_corrections || "null") || {};
+
+      // 评分：合并；备份的优先（如果用户最近重打分了，那条更新；这里以备份为基础再叠加现有）
+      const curR = this.getUserRatings();
+      const mergedR = { ...ratings, ...curR };
+      this._set("user_ratings", mergedR);
+      // 已读：并集
+      const curRd = this.getReads();
+      const mergedRd = { ...reads, ...curRd };
+      this._set("reads", mergedRd);
+      // 批注：按 epId 合并（每集的 list 取并集，按 ann.id 去重）
+      const curA = this._get("annotations", {});
+      const mergedA = { ...annotations };
+      for (const [epId, list] of Object.entries(curA)) {
+        const fromBackup = mergedA[epId] || [];
+        const seen = new Set(fromBackup.map(a => a.id));
+        const extra = list.filter(a => !seen.has(a.id));
+        mergedA[epId] = [...fromBackup, ...extra];
+      }
+      this._set("annotations", mergedA);
+      // 待处理单集：按 episode_id 并集
+      const curP = this.getPendingEpisodes();
+      const seenP = new Set(pending.map(p => p.episode_id));
+      const mergedP = [...pending, ...curP.filter(p => !seenP.has(p.episode_id))];
+      this._set("pending_episodes", mergedP);
+      // learned：直接合并（可能丢一些权重精度但无伤大雅）
+      const curL = this.getLearnedWeights();
+      this._set("learned_weights", { ...learned, ...curL });
+      // 用户更正：按 epId 合并，每集 list 按 (original→corrected) 去重
+      const curC = this._get("corrections", {});
+      const mergedC = { ...correctionsBak };
+      for (const [epId, list] of Object.entries(curC)) {
+        const fromBackup = mergedC[epId] || [];
+        const seenC = new Set(fromBackup.map(c => `${c.original}→${c.corrected}`));
+        const extra = list.filter(c => !seenC.has(`${c.original}→${c.corrected}`));
+        mergedC[epId] = [...fromBackup, ...extra];
+      }
+      this._set("corrections", mergedC);
+      written = 6;
+      return { written, skipped };
+    }
+    // merge / replace
+    for (const [k, v] of Object.entries(payload.data)) {
+      if (!k.startsWith("bp_") || k === "bp_snap_history") continue;
+      if (mode === "merge" && localStorage.getItem(k)) { skipped++; continue; }
+      try { localStorage.setItem(k, v); written++; } catch {}
+    }
+    return { written, skipped };
+  },
+  // 诊断：当前每个 key 的 size 与简要内容统计
+  diagnose() {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      const v = localStorage.getItem(k) || "";
+      const size = new Blob([v]).size;
+      let summary = "";
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) summary = `array · ${parsed.length} 条`;
+        else if (parsed && typeof parsed === "object") summary = `${Object.keys(parsed).length} 键`;
+        else summary = String(parsed).slice(0, 30);
+      } catch { summary = v.slice(0, 30); }
+      out.push({ key: k, size, summary });
+    }
+    return out.sort((a, b) => b.size - a.size);
+  },
+};
+function bpExtractFeatures(ep) {
+  const text = [ep.title||"", ep._channelName||"", (ep.guests||[]).join(" "), (ep.guestBackgrounds||[]).join(" "), (ep.keyTopics||[]).join(" "), ep.briefSummary||""].join(" ").toLowerCase();
+  const seen = new Set();
+  const features = [];
+  for (const [cat, {words, base}] of Object.entries(BP_KEYWORDS)) {
+    for (const w of words) { if (text.includes(w) && !seen.has(w)) { seen.add(w); features.push({cat, word: w, base}); } }
+  }
+  return { text, features };
+}
+function bpRateEpisode(ep) {
+  const learned = BP_RATING_DB.getLearnedWeights();
+  // 月度学到的 overrides（频道/关键词/嘉宾 bonus）— 由 auto_tune_weights.py 每月 1 号校准
+  const overrides = window.BP_OVERRIDES || {};
+  const chBonus = overrides.channel_bonus || {};
+  const kwBonus = overrides.keyword_bonus || {};
+  const gBonus = overrides.guest_bonus || {};
+
+  let score = 0;
+  // 1. 频道权重 + 月度频道偏好
+  score += BP_CHANNEL_WEIGHT[ep._channelName] || 0;
+  score += chBonus[ep._channelName] || 0;
+  // 2. 关键词命中 + 月度关键词偏好
+  const { features } = bpExtractFeatures(ep);
+  for (const f of features) {
+    score += Math.max(0, f.base + (learned[f.word] || 0));
+    score += kwBonus[f.word] || 0;
+  }
+  // 3. 嘉宾 tier — 也从 title/summary 里捕捉嘉宾名（很多集 guests 字段为空）
+  const guestText = [(ep.guests||[]).join(" "), (ep.guestBackgrounds||[]).join(" "), ep.title||"", ep.briefSummary||""].join(" ").toLowerCase();
+  if (BP_GUEST_TIER.top.some(g => guestText.includes(g))) score += 3;
+  else if (BP_GUEST_TIER.high.some(g => guestText.includes(g))) score += 2;
+  // 月度嘉宾 bonus（明确出现在 guests 数组里全额，标题里出现半额）
+  for (const g of (ep.guests || [])) score += gBonus[g] || 0;
+  for (const [g, b] of Object.entries(gBonus)) {
+    if (g && guestText.includes(g.toLowerCase()) && !(ep.guests||[]).includes(g)) score += b * 0.5;
+  }
+
+  // 阈值从 ./rating_thresholds.json 动态读取（兜底默认 18/7）
+  const t3 = (window.BP_THRESHOLDS && window.BP_THRESHOLDS.tier_3_min) || 18;
+  const t2 = (window.BP_THRESHOLDS && window.BP_THRESHOLDS.tier_2_min) || 7;
+  if (score >= t3) return 3;
+  if (score >= t2) return 2;
+  return 1;
+}
+// 直接评分（显式反馈）— step=0.25/命中词
+function bpLearnFromRating(ep, userScore) {
+  const aiScore = bpRateEpisode(ep);
+  const delta = userScore - aiScore;
+  if (delta === 0) return;
+  const { features } = bpExtractFeatures(ep);
+  if (!features.length) return;
+  const learned = BP_RATING_DB.getLearnedWeights();
+  const step = delta * 0.25 / features.length;
+  for (const f of features) learned[f.word] = Math.max(-2, Math.min(2, (learned[f.word] || 0) + step));
+  BP_RATING_DB.saveLearnedWeights(learned);
+}
+// 隐式反馈（已读/批注）— 把对命中词的兴趣做小幅正向调整
+// strength: 已读=0.3；批注按字数缩放（50字≈0.5，200字≈1.0，封顶1.5）
+function bpImplicitBoost(ep, strength) {
+  const { features } = bpExtractFeatures(ep);
+  if (!features.length) return;
+  const learned = BP_RATING_DB.getLearnedWeights();
+  const step = Math.min(1.5, strength) * 0.08 / features.length;
+  for (const f of features) learned[f.word] = Math.max(-2, Math.min(2, (learned[f.word] || 0) + step));
+  BP_RATING_DB.saveLearnedWeights(learned);
+}
+function bpAnnotationBoostStrength(charCount) {
+  // 0 字=0；50 字≈0.5；200 字≈1.0；封顶 1.5
+  return Math.min(1.5, charCount / 150);
+}
+function RatingStars({ ep, onChange }) {
+  const [userRating, setUserRating] = useState(BP_RATING_DB.getUserRatings()[ep._id] || 0);
+  const aiRating = bpRateEpisode(ep);
+  const handleClick = (i, e) => {
+    e.stopPropagation();
+    const newR = userRating === i ? 0 : i;
+    setUserRating(newR);
+    BP_RATING_DB.setUserRating(ep._id, newR);
+    if (newR > 0) bpLearnFromRating(ep, newR);
+    onChange?.(newR);
+  };
+  const aiStars = [1,2,3].map(i => <span key={i} style={{color: i <= aiRating ? "#f59e0b" : "#ddd"}}>★</span>);
+  const userStars = [1,2,3].map(i => (
+    <span key={i} onClick={e => handleClick(i, e)}
+      style={{color: userRating && i <= userRating ? "#8b5cf6" : "#d4d4d4", cursor: "pointer", transition: "color .1s", padding: "0 1px"}}>★</span>
+  ));
+  return (
+    <div style={{display: "flex", gap: 6, alignItems: "center", flexShrink: 0}}>
+      <span style={{display: "flex", alignItems: "center", gap: 3}}>
+        <span style={{fontFamily: mno, fontSize: 8, color: C.textDim}}>AI</span>
+        <span style={{fontSize: 11, letterSpacing: 0.5, lineHeight: 1}}>{aiStars}</span>
+      </span>
+      <span style={{display: "flex", alignItems: "center", gap: 3}}>
+        <span style={{fontFamily: mno, fontSize: 8, color: C.textDim}}>我</span>
+        <span style={{fontSize: 11, letterSpacing: 0.5, lineHeight: 1}}>{userStars}</span>
+      </span>
+    </div>
+  );
+}
+
+// ─── Episode Card ───
+function EpisodeCard({ ep, onOpen, onRetranscribeOpenAI }) {
+  // 转录中状态：每 30s tick 一次让过期自动消失
+  const [, _tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => _tick(n => n + 1), 30 * 1000);
+    return () => clearInterval(t);
+  }, []);
+  const retranscribing = BP_RATING_DB.getRetranscribing(ep._id);
+  const [h, setH] = useState(false);
+  const [isRead, setIsRead] = useState(BP_RATING_DB.isRead(ep._id));
+  const hasTranscript = ep.transcriptSegments?.length > 0;
+  const toggleRead = (e) => {
+    e.stopPropagation();
+    const nowRead = BP_RATING_DB.toggleRead(ep._id);
+    setIsRead(nowRead);
+    // 隐式反馈：标为已读代表你花时间看过，给命中词做小幅正向加权
+    if (nowRead) bpImplicitBoost(ep, 0.3);
+  };
+  const titleColor = isRead ? C.textRead : C.text;
+  const bodyColor = isRead ? C.textRead : C.textSec;
+  const cardBg = isRead ? "#f1f2f5" : (h ? C.cardHover : C.card);
+  return (
+    <div onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)} onClick={() => { if (ep._isPlaceholder) return; onOpen(ep); }}
+      style={{ position: "relative", background: cardBg, border: `1px solid ${ep._isNew && !isRead ? C.accentDark : C.border}`, borderRadius: 8, padding: "12px 16px", cursor: "pointer", transition: "all .15s", transform: h ? "translateY(-1px)" : "none", boxShadow: h ? "0 8px 24px rgba(0,0,0,.08)" : "none", opacity: isRead ? 0.85 : 1 }}>
+      {ep._isNew && !isRead && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,${C.accent},transparent)`, borderRadius: "8px 8px 0 0" }} />}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+            {ep._isNew && !isRead && <PulseDot />}
+            <span style={{ fontFamily: mno, fontSize: 9, color: isRead ? C.textDim : C.accentDark, letterSpacing: 1 }}>{ep._channelName}</span>
+            {(() => {
+              // 5 种状态互斥（按优先级）：
+              //   a) 转录中（按 model 区分免费/付费）
+              //   b) 已用 GPT-4o 转录
+              //   c) 仅 Whisper 转录（带💰付费升级按钮）
+              //   d) 已转录待总结（占位 ep）
+              //   e) 未转录（占位 ep，💰 付费转录按钮）
+              if (retranscribing) {
+                const m = retranscribing.model || "gpt-4o-hybrid";
+                let label, bg, border, color;
+                if (m.startsWith("groq-") || m.startsWith("whisper-large")) {
+                  label = "⏳ Whisper 转录中"; color = "#3a7ad9";
+                  bg = "rgba(58,122,217,.10)"; border = "rgba(58,122,217,.35)";
+                } else if (m.startsWith("openai-whisper")) {
+                  label = "💰 付费 Whisper 转录中"; color = "#b8860b";
+                  bg = "rgba(184,134,11,.10)"; border = "rgba(184,134,11,.35)";
+                } else {
+                  // gpt-4o-hybrid 或其他付费
+                  label = "💰 GPT-4o 付费转录中"; color = "#7c3aed";
+                  bg = "rgba(124,58,237,.10)"; border = "rgba(124,58,237,.35)";
+                }
+                return (
+                  <span style={{ fontFamily: mno, fontSize: 9, color, background: bg, padding: "0px 5px", borderRadius: 3, border: `1px solid ${border}`, display: "inline-flex", alignItems: "center", gap: 4, animation: "pulse 1.5s ease-in-out infinite" }}>
+                    {label}
+                    <button onClick={(e) => { e.stopPropagation(); BP_RATING_DB.clearRetranscribing(ep._id); _tick(n => n + 1); }}
+                      title="清除（不会停止后台进程，只是把这个标签隐藏）"
+                      style={{ fontFamily: mno, fontSize: 9, color, background: "transparent", border: "none", cursor: "pointer", padding: 0, lineHeight: 1, opacity: 0.6 }}>✕</button>
+                  </span>
+                );
+              }
+              const isGpt4o = hasTranscript && (ep._transcribeModel || "").includes("gpt-4o");
+              if (isGpt4o) {
+                return (
+                  <span style={{ fontFamily: mno, fontSize: 9, color: "#7c3aed", background: "rgba(124,58,237,.1)", padding: "0px 5px", borderRadius: 3, border: "1px solid rgba(124,58,237,.35)" }}>✓ 已用 GPT-4o 转录</span>
+                );
+              }
+              if (hasTranscript) {
+                return (
+                  <>
+                    <span style={{ fontFamily: mno, fontSize: 9, color: C.accent, background: C.accentBg, padding: "0px 5px", borderRadius: 3, border: `1px solid ${C.accentBorder}` }}>已转录</span>
+                    <button onClick={(e) => { e.stopPropagation(); onRetranscribeOpenAI?.(ep); }} title="使用 OpenAI gpt-4o 付费版重新转录（约 $1-2/集）— 词汇库自动嵌入"
+                      style={{ fontFamily: mno, fontSize: 9, color: "#7c3aed", background: "rgba(124,58,237,.06)", padding: "0px 5px", borderRadius: 3, border: "1px solid rgba(124,58,237,.25)", cursor: "pointer" }}>🔁 GPT-4o 重转</button>
+                  </>
+                );
+              }
+              // 未转录的占位 episode（episodes_index 同步进来的）
+              if (ep._isPlaceholder || ep._status === "pending" || ep._status === "transcribed_no_summary") {
+                const label = ep._status === "transcribed_no_summary" ? "✓ 已转录待总结" : "⏳ 待转录";
+                const labelColor = ep._status === "transcribed_no_summary" ? "#3a7ad9" : C.textDim;
+                const labelBg = ep._status === "transcribed_no_summary" ? "rgba(58,122,217,.08)" : "#f3f3f3";
+                const labelBorder = ep._status === "transcribed_no_summary" ? "rgba(58,122,217,.25)" : C.border;
+                return (
+                  <>
+                    <span style={{ fontFamily: mno, fontSize: 9, color: labelColor, background: labelBg, padding: "0px 5px", borderRadius: 3, border: `1px solid ${labelBorder}` }}>{label}</span>
+                    <button onClick={(e) => { e.stopPropagation(); onRetranscribeOpenAI?.(ep); }} title="不等 Groq 配额，立即用 OpenAI 付费 API 转录（约 $0.5-2/集）"
+                      style={{ fontFamily: mno, fontSize: 9, color: "#b8860b", background: "rgba(184,134,11,.08)", padding: "0px 5px", borderRadius: 3, border: "1px solid rgba(184,134,11,.30)", cursor: "pointer", fontWeight: 600 }}>💰 付费转录</button>
+                  </>
+                );
+              }
+              return null;
+            })()}
+            {isRead && <span style={{ fontFamily: mno, fontSize: 9, color: C.textRead, background: "#e7e8ec", padding: "0px 5px", borderRadius: 3 }}>已读过</span>}
+          </div>
+          <h3 style={{ fontFamily: srf, fontSize: 16, fontWeight: 600, color: titleColor, margin: 0, lineHeight: 1.3 }}>{ep.title}</h3>
+        </div>
+        <span style={{ fontFamily: mno, fontSize: 10, color: C.textDim, whiteSpace: "nowrap" }}>{ep.date}</span>
+      </div>
+      {ep.guests?.length > 0 && <div style={{ display: "flex", gap: 4, marginBottom: 4, flexWrap: "wrap" }}>
+        {ep.guests.map((g, i) => <span key={i} style={{ fontFamily: mno, fontSize: 9, color: isRead ? C.textDim : C.blue, padding: "1px 6px", background: "rgba(96,168,240,.06)", border: "1px solid rgba(96,168,240,.12)", borderRadius: 3 }}>{g}</span>)}
+      </div>}
+      <p style={{ fontFamily: srf, fontSize: 13.5, color: bodyColor, lineHeight: 1.55, margin: "0 0 6px" }}>{ep.briefSummary}</p>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6, flexWrap: "wrap" }}>
+        {ep.keyTopics?.map((t, i) => <span key={i} style={{ fontFamily: mno, fontSize: 9, color: C.textDim, padding: "1px 6px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 3 }}>#{t}</span>)}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={toggleRead} title={isRead ? "取消已读" : "标记为已读过"}
+            style={{ fontFamily: mno, fontSize: 9, padding: "2px 7px", borderRadius: 4, cursor: "pointer",
+              color: isRead ? C.bg : C.textSec,
+              background: isRead ? C.textRead : C.surface,
+              border: `1px solid ${isRead ? C.textRead : C.border}` }}>
+            {isRead ? "✓ 已读" : "标为已读"}
+          </button>
+          <RatingStars ep={ep} />
+          <span style={{ fontFamily: mno, fontSize: 9, color: C.textDim }}>详情 →</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Transcript Viewer ───
+function TranscriptViewer({ segments, audioUrl, corrections, onCorrect, findContext }) {
+  const [playing, setPlaying] = useState(null);
+  const [search, setSearch] = useState("");
+  const [pendingSel, setPendingSel] = useState(null); // {text, top, left, right} 用于显示 ✎ 更正按钮
+  const [highlightIdx, setHighlightIdx] = useState(null);  // 查找原文短暂高亮的 segment
+  const containerRef = useRef(null);
+  const audioRef = useRef(null);
+
+  // 应用 corrections 到每个 segment 的 text
+  const correctedSegs = useMemo(() => {
+    if (!corrections || !corrections.length) return segments;
+    return segments.map(s => ({ ...s, text: bpApplyCorrections(s.text, corrections) }));
+  }, [segments, corrections]);
+
+  const filteredSegs = search.trim()
+    ? correctedSegs.filter(s => s.text.toLowerCase().includes(search.toLowerCase()))
+    : correctedSegs;
+
+  const playFrom = (startSec) => {
+    if (!audioUrl) return;
+    if (!audioRef.current) {
+      audioRef.current = new Audio(audioUrl);
+      audioRef.current.addEventListener("ended", () => setPlaying(null));
+    }
+    audioRef.current.currentTime = startSec;
+    audioRef.current.play();
+    setPlaying(startSec);
+  };
+
+  const stopAudio = () => {
+    if (audioRef.current) { audioRef.current.pause(); }
+    setPlaying(null);
+  };
+
+  useEffect(() => { return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }; }, []);
+
+  // 🔍 查找原文：findContext 变化时，搜索 segments + 滚动 + 短暂高亮
+  useEffect(() => {
+    if (!findContext?.text || !correctedSegs.length) return;
+    const needle = findContext.text.replace(/\*/g, "").trim();
+    if (!needle) return;
+    // 1) 精确匹配（整段或子串）
+    let foundIdx = correctedSegs.findIndex(s => (s.text || "").includes(needle));
+    // 2) 短前缀匹配（嘉宾原话可能被 Opus 微调过）
+    if (foundIdx < 0 && needle.length >= 6) {
+      const probes = [needle.slice(0, 16), needle.slice(0, 10), needle.slice(0, 6)].filter(p => p.length >= 4);
+      for (const probe of probes) {
+        foundIdx = correctedSegs.findIndex(s => (s.text || "").includes(probe));
+        if (foundIdx >= 0) break;
+      }
+    }
+    if (foundIdx < 0) {
+      setHighlightIdx({ idx: -1, msg: "未找到对应原文段落（划词内容可能是 AI 重写而非逐字摘录）" });
+      setTimeout(() => setHighlightIdx(prev => prev?.msg ? null : prev), 4000);
+      return;
+    }
+    // 滚到目标 + 高亮 4 秒
+    setHighlightIdx({ idx: foundIdx });
+    setTimeout(() => {
+      const el = containerRef.current?.querySelector(`[data-seg-idx="${foundIdx}"]`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
+    const t = setTimeout(() => setHighlightIdx(null), 4000);
+    return () => clearTimeout(t);
+  }, [findContext]);
+
+  // 选词检测：用户在转录区域选了一段文字 → 浮出 ✎ 更正 按钮
+  const handleSelection = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) { setPendingSel(null); return; }
+    const text = sel.toString().trim();
+    if (text.length < 1 || text.length > 60) { setPendingSel(null); return; }
+    if (!containerRef.current || sel.rangeCount === 0) { setPendingSel(null); return; }
+    const range = sel.getRangeAt(0);
+    if (!containerRef.current.contains(range.commonAncestorContainer)) { setPendingSel(null); return; }
+    const cRect = containerRef.current.getBoundingClientRect();
+    const rects = range.getClientRects();
+    const lastRect = rects.length > 0 ? rects[rects.length - 1] : range.getBoundingClientRect();
+    setPendingSel({
+      text,
+      top: lastRect.bottom - cRect.top + 4,
+      left: Math.max(0, lastRect.left - cRect.left),
+    });
+  };
+
+  return (
+    <div ref={containerRef} style={{ position: "relative" }} onMouseUp={handleSelection}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索转录内容…"
+          style={{ flex: 1, fontFamily: mno, fontSize: 11, color: C.text, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 4, padding: "5px 10px", outline: "none" }} />
+        <span style={{ fontFamily: mno, fontSize: 9, color: C.textDim }}>{filteredSegs.length}/{segments.length}</span>
+        {playing !== null && <button onClick={stopAudio} style={{ fontFamily: mno, fontSize: 9, color: C.red, background: "rgba(240,96,96,.06)", border: "1px solid rgba(240,96,96,.12)", borderRadius: 4, padding: "3px 8px", cursor: "pointer" }}>■ 停止</button>}
+      </div>
+
+      {/* 🔍 查找原文 提示条（短暂显示） */}
+      {highlightIdx?.msg && (
+        <div style={{ marginBottom: 8, padding: "8px 12px", background: "rgba(96,168,240,.08)", border: "1px solid rgba(96,168,240,.25)", borderRadius: 6, fontFamily: mno, fontSize: 11, color: C.blue }}>
+          🔍 {highlightIdx.msg}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+        {filteredSegs.map((seg, i) => {
+          // 找到这个 seg 在 correctedSegs 里的全局 idx（match findContext 时用全局 idx）
+          const globalIdx = correctedSegs.indexOf(seg);
+          const isFound = highlightIdx && typeof highlightIdx.idx === "number" && highlightIdx.idx === globalIdx;
+          return (
+            <div key={i} data-seg-idx={globalIdx} style={{
+              display: "flex", gap: 8, padding: "4px 8px", borderRadius: 4,
+              background: isFound ? "#fff59d" : (playing === seg.start ? C.accentBg : (i % 2 === 0 ? C.surface : "transparent")),
+              border: isFound ? "2px solid #f0d294" : (playing === seg.start ? `1px solid ${C.accentBorder}` : "1px solid transparent"),
+              transition: "background .35s, border .35s",
+            }}>
+              <span onClick={() => audioUrl && (playing === seg.start ? stopAudio() : playFrom(seg.start))} style={{ fontFamily: mno, fontSize: 10, color: playing === seg.start ? C.red : C.accentDark, minWidth: 52, cursor: audioUrl ? "pointer" : "default", userSelect: "none" }}>{fmtTime(seg.start)}</span>
+              {seg.speaker && <span style={{ fontFamily: mno, fontSize: 10, color: C.blue, minWidth: 40 }}>{seg.speaker}</span>}
+              <p style={{ fontFamily: srf, fontSize: 13, color: C.textSec, lineHeight: 1.55, margin: 0, flex: 1 }}>{seg.text}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ✎ 更正 浮动按钮 — 选词后显示 */}
+      {pendingSel && onCorrect && (
+        <div style={{ position: "absolute", top: pendingSel.top, left: pendingSel.left, zIndex: 30, background: C.bg, border: `1px solid #b45309`, borderRadius: 5, padding: "4px 4px", boxShadow: "0 4px 12px rgba(0,0,0,0.12)" }}>
+          <button onMouseDown={e => e.preventDefault()} onClick={() => { onCorrect(pendingSel.text, "transcript"); setPendingSel(null); }}
+            title="更正这个词的拼写（自动加入名词库）"
+            style={{ fontFamily: mno, fontSize: 11, color: "#b45309", background: C.bg, border: "none", padding: "2px 9px", cursor: "pointer", fontWeight: 600 }}>✎ 更正</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Formatted Summary — 把总结文本解析为结构化块 ───
+// 识别 ① 【…】 二级标题加粗  ② ▎HH:MM ... 章节小标题加粗  ③ 段落间距更紧凑
+// 支持 annotations 参数 → 把命中文字包在 <mark> 里做黄底高亮
+function FormattedSummary(props) {
+  const { text, innerRef, onMouseUp, corrections, expansions, expansionLoading, expandPendings, onExpandRequest } = props;
+  if (!text) return null;
+  // 应用用户更正（在解析之前对原始文本做替换）
+  const correctedText = corrections && corrections.length ? bpApplyCorrections(text, corrections) : text;
+  const lines = correctedText.split(/\r?\n/);
+  const blocks = [];
+  let buf = [];
+  const flushParagraph = () => {
+    if (buf.length) {
+      blocks.push({ type: "p", text: buf.join("\n") });
+      buf = [];
+    }
+  };
+  for (const raw of lines) {
+    const line = raw;
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+    if (/^【[^】]+】\s*$/.test(trimmed)) {
+      flushParagraph();
+      blocks.push({ type: "h2", text: trimmed });
+      continue;
+    }
+    // ▎ 开头的章节标题（常见形式：▎02:00 做过陌生人社交）
+    if (/^▎/.test(trimmed)) {
+      flushParagraph();
+      blocks.push({ type: "h3", text: trimmed });
+      continue;
+    }
+    // "要点：" 独占一行 → 作为独立加粗块
+    if (/^要点[：:]\s*$/.test(trimmed)) {
+      flushParagraph();
+      blocks.push({ type: "keypoint-label", text: trimmed });
+      continue;
+    }
+    buf.push(line);
+  }
+  flushParagraph();
+
+  // 段落解析：把 raw 文字拆成 atoms {italic, text}，然后按 annotations 做 mark 切片。
+  // 这样 * 永远不会进入 mark 区间，斜体配对也不会被切断。
+  const annotationsProp = props.annotations || [];
+
+  const parseParagraphPieces = (raw) => {
+    // Step 1: raw → atoms (plain + italic), 不含 *
+    const atoms = [];
+    const re = /\*([^*\n]+?)\*/g;
+    let last = 0, m;
+    while ((m = re.exec(raw)) !== null) {
+      if (m.index > last) atoms.push({ italic: false, text: raw.slice(last, m.index) });
+      atoms.push({ italic: true, text: m[1] });
+      last = m.index + m[0].length;
+    }
+    if (last < raw.length) atoms.push({ italic: false, text: raw.slice(last) });
+
+    // Step 2: plain 字符串（所有 atoms 拼起来，无 *）
+    const plain = atoms.map(a => a.text).join("");
+
+    // Step 3: 找 annotation 命中（长的优先以避免短的吃掉长的）
+    // 旧批注可能存了带 * 的文本，匹配时 strip 掉 * 以和 plain 对齐
+    const annSorted = [...annotationsProp].filter(a => (a.text || "").trim())
+      .sort((a, b) => (b.text || "").length - (a.text || "").length);
+    const ranges = []; // {start, end, annId}
+    for (const a of annSorted) {
+      const t = (a.text || "").trim().replace(/\*/g, "");
+      if (!t) continue;
+      let s = 0;
+      while (s < plain.length) {
+        const idx = plain.indexOf(t, s);
+        if (idx < 0) break;
+        const overlap = ranges.some(r => !(idx + t.length <= r.start || idx >= r.end));
+        if (!overlap) ranges.push({ start: idx, end: idx + t.length, annId: a.id });
+        s = idx + t.length;
+      }
+    }
+    ranges.sort((a, b) => a.start - b.start);
+
+    // Step 4: 在 atoms 上按 range 边界切分。每个 piece 保留 italic 标志 + 可选 annId。
+    const pieces = [];
+    let pos = 0;
+    for (const atom of atoms) {
+      const atomStart = pos;
+      const atomEnd = pos + atom.text.length;
+      let local = 0;
+      for (const r of ranges) {
+        if (r.end <= atomStart) continue;
+        if (r.start >= atomEnd) break;
+        const ovStart = Math.max(atomStart, r.start);
+        const ovEnd = Math.min(atomEnd, r.end);
+        const ovLocalStart = ovStart - atomStart;
+        const ovLocalEnd = ovEnd - atomStart;
+        // 前导无 mark
+        if (ovLocalStart > local) {
+          pieces.push({ text: atom.text.slice(local, ovLocalStart), italic: atom.italic, annId: null });
+        }
+        // mark 片段
+        pieces.push({ text: atom.text.slice(ovLocalStart, ovLocalEnd), italic: atom.italic, annId: r.annId });
+        local = ovLocalEnd;
+      }
+      // 剩余无 mark
+      if (local < atom.text.length) {
+        pieces.push({ text: atom.text.slice(local), italic: atom.italic, annId: null });
+      }
+      pos = atomEnd;
+    }
+    return pieces;
+  };
+
+  const renderInline = (raw) => {
+    if (!raw) return raw;
+    const pieces = parseParagraphPieces(raw);
+    const EM_STYLE = { fontStyle: "italic", color: "#0a1f5c", fontWeight: 500 };
+    // mark 只加黄底，不改字体/字重/颜色 → 内部 <em> 保持斜体深蓝
+    const MARK_STYLE = { background: "#fff59d", color: "inherit", padding: "0 1px", borderRadius: 2 };
+    return pieces.map((p, i) => {
+      // 最后一道防线：piece 里理应不再有 *（atom 已吞掉），但以防万一 strip 一次
+      let node = (p.text || "").replace(/\*/g, "");
+      if (p.italic) node = <em key={`em-${i}`} style={EM_STYLE}>{node}</em>;
+      if (p.annId) {
+        node = (
+          <mark key={`mk-${i}`} data-ann-id={p.annId} style={MARK_STYLE}>{node}</mark>
+        );
+      } else if (!p.italic) {
+        node = <React.Fragment key={`tx-${i}`}>{node}</React.Fragment>;
+      }
+      return node;
+    });
+  };
+
+  // 给每个 block 标注它属于哪个章节（h3 索引）
+  // -1 = 在第一个 h3 之前（如【核心观点】下的段落）
+  let _chapterCounter = -1;
+  const blockChapter = blocks.map(b => {
+    if (b.type === "h3") _chapterCounter++;
+    return _chapterCounter;
+  });
+  // 章节 keys（h3 文字本身做 key），并提取时间戳秒数
+  const chapterMeta = [];  // [{key, startSec}]
+  blocks.forEach(b => {
+    if (b.type === "h3") {
+      const m = b.text.match(/^▎\s*(?:(\d+):)?(\d+):(\d+)/);
+      let sec = 0;
+      if (m) {
+        const hh = parseInt(m[1] || "0");
+        const mm = parseInt(m[2] || "0");
+        const ss = parseInt(m[3] || "0");
+        sec = hh * 3600 + mm * 60 + ss;
+      }
+      chapterMeta.push({ key: b.text, startSec: sec });
+    }
+  });
+  // 章节是否被展开
+  const isExpanded = (cIdx) => cIdx >= 0 && expansions && expansions[chapterMeta[cIdx]?.key];
+  const isLoading = (cIdx) => cIdx >= 0 && expansionLoading && expansionLoading[chapterMeta[cIdx]?.key];
+  // 跨电脑队列里这个章节是不是 pending/processing（主电脑 worker 还没处理完）
+  const isCloudPending = (cIdx) => {
+    if (cIdx < 0 || !expandPendings) return false;
+    const ck = chapterMeta[cIdx]?.key;
+    const p = ck && expandPendings[ck];
+    return p && (p.status === "pending" || p.status === "processing");
+  };
+
+  return (
+    <div ref={innerRef} onMouseUp={onMouseUp}
+      style={{ fontFamily: srf, fontSize: 14.5, color: C.text, lineHeight: 1.7, background: C.surface, borderRadius: 8, padding: "16px 22px", border: `1px solid ${C.border}`, userSelect: "text" }}>
+      {blocks.map((b, i) => {
+        const cIdx = blockChapter[i];
+        const expanded = isExpanded(cIdx);
+        const loading = isLoading(cIdx);
+        const cloudPending = isCloudPending(cIdx);
+
+        if (b.type === "h2") {
+          return <h2 key={i} style={{ fontFamily: srf, fontSize: 17, fontWeight: 700, color: C.text, margin: i === 0 ? "0 0 8px" : "18px 0 8px", lineHeight: 1.35 }}>{b.text}</h2>;
+        }
+        if (b.type === "h3") {
+          const meta = chapterMeta[cIdx];
+          const endSec = chapterMeta[cIdx + 1]?.startSec || (meta?.startSec || 0) + 60 * 60;
+          // 收集本章节当前文字（用作 prompt 的 current_text）
+          const sectionEnd = blocks.findIndex((bb, j) => j > i && bb.type === "h3");
+          const sectionBlocks = blocks.slice(i, sectionEnd > 0 ? sectionEnd : undefined);
+          const sectionText = sectionBlocks.map(bb => bb.text).join("\n\n");
+          return (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "14px 0 6px", gap: 8 }}>
+              <h3 style={{ fontFamily: srf, fontSize: 14.5, fontWeight: 700, color: C.text, margin: 0, lineHeight: 1.4, flex: 1 }}>{b.text}</h3>
+              {onExpandRequest && (
+                <button
+                  onClick={() => {
+                    if (loading || cloudPending) return;
+                    if (expanded) {
+                      // 二次点击 → 还原
+                      onExpandRequest({ action: "revert", chapterKey: meta.key });
+                    } else {
+                      onExpandRequest({ action: "expand", chapterKey: meta.key, startSec: meta.startSec, endSec, currentText: sectionText });
+                    }
+                  }}
+                  title={
+                    expanded ? "已展开详细版本，点击还原" :
+                    loading ? "正在生成更详细版本…" :
+                    cloudPending ? "已委托主电脑生成，dashboard 每 60 秒自动同步一次" :
+                    "用 transcript + Opus 生成 2-3x 长度的更详细版本"
+                  }
+                  style={{
+                    fontFamily: mno, fontSize: 9, fontWeight: 600,
+                    padding: "3px 9px", borderRadius: 4, cursor: (loading || cloudPending) ? "default" : "pointer",
+                    color: (loading || cloudPending) ? C.textDim : (expanded ? "#0a1f5c" : "#7c3aed"),
+                    background: expanded ? "rgba(10,31,92,.08)" : ((loading || cloudPending) ? C.surface : "rgba(124,58,237,.08)"),
+                    border: `1px solid ${expanded ? "rgba(10,31,92,.25)" : ((loading || cloudPending) ? C.border : "rgba(124,58,237,.25)")}`,
+                    whiteSpace: "nowrap",
+                    opacity: (loading || cloudPending) ? 0.7 : 1,
+                  }}>
+                  {loading ? "⏳ 生成中…" :
+                   cloudPending ? "⏳ 已委托主电脑" :
+                   expanded ? "✓ 已展开详细版" :
+                   "+ 更详细总结"}
+                </button>
+              )}
+            </div>
+          );
+        }
+        // 章节内容块：如果该章节已展开 → 用扩展文本替代（仅在第一个非 h3 块渲染扩展文本，其它跳过）
+        if (cIdx >= 0 && expanded) {
+          // 找到该章节的第一个非 h3 块的位置
+          const firstContentI = blocks.findIndex((bb, j) => j > 0 && blockChapter[j] === cIdx && bb.type !== "h3");
+          if (i !== firstContentI) return null;  // 跳过该章节后续原始块（被扩展文本覆盖）
+          const expandedText = expansions[chapterMeta[cIdx].key].text || "";
+          // 用同样的 inline 渲染逻辑（识别 *italic* + 高亮）
+          const expandedLines = expandedText.split(/\r?\n/);
+          return (
+            <div key={i} style={{ marginTop: 4, padding: "10px 12px", background: "rgba(10,31,92,.02)", border: "1px solid rgba(10,31,92,.10)", borderRadius: 5 }}>
+              <div style={{ fontFamily: mno, fontSize: 9, color: "#0a1f5c", marginBottom: 6, fontWeight: 600 }}>详细版本（Opus 4.7 基于 transcript 重新展开）</div>
+              {expandedLines.map((line, k) => {
+                const t = line.trim();
+                if (!t) return <div key={k} style={{ height: 6 }} />;
+                if (/^要点[：:]\s*$/.test(t)) {
+                  return <p key={k} style={{ fontFamily: srf, fontSize: 14.5, fontWeight: 700, color: C.text, margin: "12px 0 4px", lineHeight: 1.5 }}>{t}</p>;
+                }
+                return <p key={k} style={{ fontFamily: srf, fontSize: 14.5, color: C.text, lineHeight: 1.7, margin: "0 0 7px", whiteSpace: "pre-wrap" }}>{renderInline(line)}</p>;
+              })}
+            </div>
+          );
+        }
+        // "要点：" 标记行 — 本身加粗，上间距额外拉开
+        if (b.type === "keypoint-label") {
+          return <p key={i} style={{ fontFamily: srf, fontSize: 14.5, fontWeight: 700, color: C.text, margin: "14px 0 4px", lineHeight: 1.5 }}>{b.text}</p>;
+        }
+        return <p key={i} style={{ fontFamily: srf, fontSize: 14.5, color: C.text, lineHeight: 1.7, margin: "0 0 7px", whiteSpace: "pre-wrap" }}>{renderInline(b.text)}</p>;
+      })}
+    </div>
+  );
+}
+
+// ─── Annotation Sidebar (Word-style 批注) ───
+// 新版：每张批注卡绝对定位在对应黄色高亮的 Y 坐标；卡不跟随滚动独立动，因为它和正文一起随页面滚
+function AnnotationSidebar({ ep, annotations, setAnnotations, summaryRef, editingIds, setEditingIds, textareaRefs, sourceText }) {
+  const [posMap, setPosMap] = useState({}); // ann_id -> { top, height }
+  const [layoutTick, setLayoutTick] = useState(0);
+  const cardRefs = useRef({});
+  const asideRef = useRef(null);
+  const [containerW] = useState(300);
+
+  // 测量+布局：
+  //   1) 每条批注对应 <mark> 的 Y（相对 aside 本身，也就是卡片的定位坐标系）= 期望 top
+  //   2) 测量每张卡片实际高度
+  //   3) bump-down 避让：从上往下走，如果当前卡片 top 会和上一卡片重叠，就向下推
+  //      → 能排开时保持在 mark 原位；排不开时顺延（自然叠放）
+  useLayoutEffect(() => {
+    if (!summaryRef.current || !asideRef.current) return;
+    const marks = summaryRef.current.querySelectorAll("mark[data-ann-id]");
+    const asideBox = asideRef.current.getBoundingClientRect();
+
+    // Step 1: 期望 top = mark Y 相对 aside 顶部
+    const desired = {};
+    const seen = new Set();
+    marks.forEach(m => {
+      const id = m.getAttribute("data-ann-id");
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      const markBox = m.getBoundingClientRect();
+      desired[id] = markBox.top - asideBox.top;
+    });
+
+    // Step 2: 按期望 top 升序排序
+    const withDesired = annotations.filter(a => desired[a.id] != null);
+    withDesired.sort((a, b) => desired[a.id] - desired[b.id]);
+
+    // Step 3: 测量卡片高度（使用已渲染的 cardRefs；首次渲染时 fallback 70）
+    const heights = {};
+    withDesired.forEach(a => {
+      const el = cardRefs.current[a.id];
+      heights[a.id] = el ? el.getBoundingClientRect().height : 70;
+    });
+
+    // Step 4: bump-down —— 能排开就按 mark Y 放，重叠就向下推
+    const GAP = 8;
+    const TOP_PAD = 46; // 避开 sticky "批注 · N" 标题条
+    const result = {};
+    let floor = TOP_PAD;
+    for (const a of withDesired) {
+      const want = Math.max(desired[a.id], TOP_PAD);
+      const top = Math.max(want, floor);
+      result[a.id] = { top, height: heights[a.id] };
+      floor = top + heights[a.id] + GAP;
+    }
+
+    // 避免没变化时多余 setState 造成无限循环
+    setPosMap(prev => {
+      const prevKeys = Object.keys(prev);
+      const newKeys = Object.keys(result);
+      if (prevKeys.length === newKeys.length &&
+          newKeys.every(k => prev[k] && Math.abs(prev[k].top - result[k].top) < 0.5 && Math.abs(prev[k].height - result[k].height) < 0.5)) {
+        return prev;
+      }
+      return result;
+    });
+  }, [summaryRef, annotations, editingIds, layoutTick]);
+
+  // 窗口缩放时重新布局
+  useEffect(() => {
+    const onResize = () => setLayoutTick(v => v + 1);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const expandForEdit = (id) => {
+    setEditingIds(prev => { const n = new Set(prev); n.add(id); return n; });
+    setTimeout(() => { textareaRefs.current[id]?.focus(); }, 60);
+  };
+  const collapseIfEmpty = (id, note) => {
+    if (!note || !note.trim()) {
+      setEditingIds(prev => { const n = new Set(prev); n.delete(id); return n; });
+    }
+  };
+  const updateNote = (id, note) => {
+    const updated = annotations.map(a => a.id === id ? { ...a, note, updated: Date.now() } : a);
+    setAnnotations(updated);
+    BP_RATING_DB.saveAnnotations(ep._id, updated);
+    const totalChars = BP_RATING_DB.getAnnotationCharCount(ep._id);
+    bpImplicitBoost(ep, bpAnnotationBoostStrength(totalChars));
+  };
+  const deleteAnn = (id) => {
+    const updated = annotations.filter(a => a.id !== id);
+    setAnnotations(updated);
+    BP_RATING_DB.saveAnnotations(ep._id, updated);
+  };
+
+  // 导出功能：把整份总结（格式保留）+ 黄色高亮 + 评论（高亮后面黄色字体）输出为富文本
+  const exportNotes = () => {
+    const fullText = ep.detailedSummary || ep.briefSummary || "";
+
+    // HTML 转义
+    const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+    // 构建 annotation lookup（同 FormattedSummary 的逻辑）
+    const anns = (annotations || []).filter(a => (a.text || "").trim());
+    const annsSorted = [...anns].sort((a, b) => (b.text || "").length - (a.text || "").length);
+    const annByText = {};
+    for (const a of anns) {
+      const t = (a.text || "").trim();
+      if (t && !annByText[t]) annByText[t] = a;
+    }
+
+    // 解析 raw 为 blocks（同 FormattedSummary）
+    const lines = fullText.split(/\r?\n/);
+    const blocks = []; // {type, text}
+    let buf = [];
+    const flushP = () => { if (buf.length) { blocks.push({ type: "p", text: buf.join("\n") }); buf = []; } };
+    for (const raw of lines) {
+      const trimmed = raw.trim();
+      if (!trimmed) { flushP(); continue; }
+      if (/^【[^】]+】\s*$/.test(trimmed)) { flushP(); blocks.push({ type: "h2", text: trimmed }); continue; }
+      if (/^▎/.test(trimmed)) { flushP(); blocks.push({ type: "h3", text: trimmed }); continue; }
+      if (/^要点[：:]\s*$/.test(trimmed)) { flushP(); blocks.push({ type: "keypoint-label", text: trimmed }); continue; }
+      buf.push(raw);
+    }
+    flushP();
+
+    // 段落内：atom-based 算法（与 FormattedSummary 保持一致）
+    // raw → atoms {italic, text} 不含 * → 在 plain 上找 annotation 区间 → atom 按区间切片
+    // 这样 * 永远不会进入 mark 区间，斜体配对也不会被切断
+    const renderParaHtml = (raw) => {
+      // Step 1: raw → atoms
+      const atoms = [];
+      const reIt = /\*([^*\n]+?)\*/g;
+      let last = 0, m;
+      while ((m = reIt.exec(raw)) !== null) {
+        if (m.index > last) atoms.push({ italic: false, text: raw.slice(last, m.index) });
+        atoms.push({ italic: true, text: m[1] });
+        last = m.index + m[0].length;
+      }
+      if (last < raw.length) atoms.push({ italic: false, text: raw.slice(last) });
+
+      // Step 2: plain 拼接（无 *）
+      const plain = atoms.map(a => a.text).join("");
+
+      // Step 3: 在 plain 上找 annotation 区间（长的优先，不重叠）
+      // 旧批注文本可能含有 *，strip 后再和无 * 的 plain 对齐
+      const ranges = [];
+      for (const a of annsSorted) {
+        const t = (a.text || "").trim().replace(/\*/g, "");
+        if (!t) continue;
+        let s = 0;
+        while (s < plain.length) {
+          const idx = plain.indexOf(t, s);
+          if (idx < 0) break;
+          const overlap = ranges.some(r => !(idx + t.length <= r.start || idx >= r.end));
+          if (!overlap) ranges.push({ start: idx, end: idx + t.length, ann: a });
+          s = idx + t.length;
+        }
+      }
+      ranges.sort((a, b) => a.start - b.start);
+
+      // Step 4: 把 atoms 按 range 边界切片 → pieces {text, italic, ann}
+      const pieces = [];
+      let pos = 0;
+      for (const atom of atoms) {
+        const atomStart = pos;
+        const atomEnd = pos + atom.text.length;
+        let local = 0;
+        for (const r of ranges) {
+          if (r.end <= atomStart) continue;
+          if (r.start >= atomEnd) break;
+          const ovStart = Math.max(atomStart, r.start);
+          const ovEnd = Math.min(atomEnd, r.end);
+          const ovLocalStart = ovStart - atomStart;
+          const ovLocalEnd = ovEnd - atomStart;
+          if (ovLocalStart > local) {
+            pieces.push({ text: atom.text.slice(local, ovLocalStart), italic: atom.italic, ann: null });
+          }
+          pieces.push({ text: atom.text.slice(ovLocalStart, ovLocalEnd), italic: atom.italic, ann: r.ann });
+          local = ovLocalEnd;
+        }
+        if (local < atom.text.length) {
+          pieces.push({ text: atom.text.slice(local), italic: atom.italic, ann: null });
+        }
+        pos = atomEnd;
+      }
+
+      // Step 5: 生成 HTML。Word 对 <mark> 支持不稳定，改用 <span style='background-color'>
+      // 这样 .doc 导出打开后黄底才会显示
+      const emStyle = "font-style:italic;color:#0a1f5c;font-weight:bold";
+      const hlStyle = "background-color:#fff59d";
+      const out = [];
+      for (let i = 0; i < pieces.length; i++) {
+        const p = pieces[i];
+        // 最后一道防线：strip 掉任何残留的 *
+        let inner = esc((p.text || "").replace(/\*/g, ""));
+        if (p.italic) inner = `<span style='${emStyle}'>${inner}</span>`;
+        if (p.ann) {
+          out.push(`<span style='${hlStyle}'>${inner}</span>`);
+          const next = pieces[i + 1];
+          const sameAnnNext = next && next.ann && next.ann.id === p.ann.id;
+          if (!sameAnnNext) {
+            const noteText = (p.ann.note || "").trim();
+            if (noteText) {
+              out.push(`&nbsp;<span style='color:#a16207;font-weight:bold'>（${esc(noteText)}）</span>`);
+            }
+          }
+        } else {
+          out.push(inner);
+        }
+      }
+      return out.join("");
+    };
+
+    // 组装 Word HTML body（pt 单位 + Microsoft YaHei 保证 Word 渲染正常）
+    const body = [];
+    body.push(`<h1 style='font-size:18pt;font-weight:bold;margin:0 0 4pt'>${esc(ep.title || "")}</h1>`);
+    body.push(`<p style='font-size:10pt;color:#666;margin:0 0 18pt'>${esc(ep._channelName || "")} · ${esc(ep.date || "")}</p>`);
+    blocks.forEach((b, i) => {
+      if (b.type === "h2") {
+        const mt = i === 0 ? 0 : 18;
+        body.push(`<h2 style='font-size:15pt;font-weight:bold;margin:${mt}pt 0 8pt'>${esc(b.text)}</h2>`);
+      } else if (b.type === "h3") {
+        body.push(`<h3 style='font-size:13pt;font-weight:bold;margin:14pt 0 6pt'>${esc(b.text)}</h3>`);
+      } else if (b.type === "keypoint-label") {
+        body.push(`<p style='font-size:11pt;font-weight:bold;margin:14pt 0 4pt'>${esc(b.text)}</p>`);
+      } else {
+        const inner = renderParaHtml(b.text).replace(/\n/g, "<br/>");
+        body.push(`<p style='font-size:11pt;line-height:1.6;margin:0 0 7pt'>${inner}</p>`);
+      }
+    });
+
+    // Word 能直接识别的 .doc（HTML 格式，包含 MSO XML 命名空间）
+    const doc = `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="ProgId" content="Word.Document">
+<meta name="Generator" content="Microsoft Word 15">
+<title>${esc(ep.title || "")}</title>
+<xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom><w:DoNotOptimizeForBrowser/></w:WordDocument></xml>
+<style>
+@page WordSection1 { size: 595.3pt 841.9pt; margin: 72pt; }
+body { font-family: "Microsoft YaHei","Segoe UI","Crimson Pro",serif; color: #222; }
+p { margin: 0 0 7pt; }
+</style>
+</head>
+<body>
+<div class="WordSection1">
+${body.join("\n")}
+</div>
+</body>
+</html>`;
+
+    const filename = `${(ep.title || ep._id || "summary").replace(/[\\\/:*?"<>|]/g, "_").slice(0, 80)}.doc`;
+    const blob = new Blob(["\uFEFF" + doc], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  // 按 Y 从小到大排序渲染（保证视觉上自上而下）
+  const sortedAnns = [...annotations].sort((a, b) => (posMap[a.id]?.top ?? 99999) - (posMap[b.id]?.top ?? 99999));
+
+  return (
+    <aside ref={asideRef} style={{ width: containerW, flexShrink: 0, borderLeft: `1px solid ${C.border}`, background: "#fafbfc", position: "relative" }}>
+      {/* 顶部标题条 */}
+      <div style={{ position: "sticky", top: 0, zIndex: 2, background: "#fafbfc", padding: "10px 12px 6px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+        <h3 style={{ fontFamily: mno, fontSize: 10, color: C.textDim, letterSpacing: 1, margin: 0, textTransform: "uppercase" }}>批注 · {annotations.length}</h3>
+        {annotations.length > 0 && (
+          <button onClick={exportNotes} title="复制全部批注为文本（含时间段标题）" style={{ fontFamily: mno, fontSize: 9, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 4, padding: "3px 8px", cursor: "pointer" }}>导出</button>
+        )}
+      </div>
+      {annotations.length === 0 && (
+        <div style={{ fontFamily: srf, fontSize: 12, color: C.textDim, fontStyle: "italic", padding: "28px 12px", lineHeight: 1.7, textAlign: "center", margin: "12px" }}>
+          在左侧总结里选中文字 →<br/>点 <b>✓ 确定</b> 添加批注<br/><br/>可以不写评论<br/>所有批注自动保存到浏览器
+        </div>
+      )}
+      {/* 每条批注绝对定位在高亮 Y 位置（bump-down 避让，能排开就排开） */}
+      {sortedAnns.map(a => {
+        const entry = posMap[a.id];
+        const top = entry ? entry.top : null;
+        const positioned = typeof top === "number";
+        const hasNote = (a.note || "").trim().length > 0;
+        const showTextarea = hasNote || editingIds.has(a.id);
+        return (
+          <div key={a.id}
+            ref={el => { if (el) cardRefs.current[a.id] = el; else delete cardRefs.current[a.id]; }}
+            style={{
+              position: positioned ? "absolute" : "relative",
+              top: positioned ? `${top}px` : "auto",
+              left: positioned ? 8 : 8,
+              right: 8,
+              margin: positioned ? 0 : "8px",
+              background: C.bg,
+              border: `1px solid ${C.border}`,
+              borderLeft: `3px solid ${C.noteBorder}`,
+              borderRadius: 4,
+              padding: "7px 10px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 5,
+              transition: "top .15s"
+            }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 6 }}>
+              <div style={{ fontFamily: srf, fontSize: 11, color: C.textSec, lineHeight: 1.5, flex: 1 }}>
+                {(() => {
+                  // 按原文样式渲染：原文 *...* 内是斜体，否则普通正体
+                  // 长批注截断到 100 字
+                  const truncated = a.text.length > 100 ? a.text.slice(0, 100) + "…" : a.text;
+                  const atoms = bpSplitByItalicFromSource(truncated, sourceText || "");
+                  return (
+                    <span>
+                      "{atoms.map((atom, i) => atom.italic
+                        ? <em key={i} style={{ fontStyle: "italic", color: "#0a1f5c", fontWeight: 500 }}>{atom.text}</em>
+                        : <span key={i}>{atom.text}</span>
+                      )}"
+                    </span>
+                  );
+                })()}
+              </div>
+              <button onClick={() => deleteAnn(a.id)} title="删除" style={{ fontFamily: mno, fontSize: 11, color: C.textDim, background: "none", border: "none", cursor: "pointer", padding: "0 2px", lineHeight: 1 }}>✕</button>
+            </div>
+            {showTextarea ? (
+              <>
+                <textarea
+                  ref={el => { if (el) textareaRefs.current[a.id] = el; }}
+                  value={a.note || ""}
+                  onChange={e => updateNote(a.id, e.target.value)}
+                  onBlur={e => collapseIfEmpty(a.id, e.target.value)}
+                  placeholder="写下你的批注…"
+                  style={{ fontFamily: srf, fontSize: 13, color: C.text, background: "transparent", border: "none", outline: "none", resize: "vertical", minHeight: 40, lineHeight: 1.55, width: "100%", padding: 0, boxSizing: "border-box" }}
+                />
+                {hasNote && (
+                  <div style={{ fontFamily: mno, fontSize: 8, color: C.textDim, textAlign: "right" }}>{new Date(a.updated).toLocaleDateString()} · {(a.note || "").length} 字</div>
+                )}
+              </>
+            ) : (
+              <button onClick={() => expandForEdit(a.id)} style={{ fontFamily: mno, fontSize: 9, color: C.textDim, background: "none", border: "none", cursor: "pointer", padding: 0, alignSelf: "flex-start", marginTop: 1 }}>+ 添加评论</button>
+            )}
+          </div>
+        );
+      })}
+    </aside>
+  );
+}
+
+// ─── Detail Page ───
+function DetailPage({ ep, onBack }) {
+  const [tab, setTab] = useState("summary");
+  // 迁移：1) 旧版占位评论 "1" 清成空；2) 批注 text 字段清掉残留的 * 字符
+  // （旧版渲染 bug 会把 *X* 显示为字面 *X*，导致用户选中时连 * 一起存进来）
+  const loadAndMigrate = () => {
+    const raw = BP_RATING_DB.getAnnotations(ep._id);
+    let changed = false;
+    const migrated = raw.map(a => {
+      const updates = {};
+      if ((a.note || "").trim() === "1") { updates.note = ""; }
+      if (a.text && a.text.includes("*")) { updates.text = a.text.replace(/\*/g, ""); }
+      if (Object.keys(updates).length) { changed = true; return { ...a, ...updates }; }
+      return a;
+    });
+    if (changed) BP_RATING_DB.saveAnnotations(ep._id, migrated);
+    return migrated;
+  };
+  const [annotations, setAnnotations] = useState(loadAndMigrate);
+  const [pendingSelection, setPendingSelection] = useState(null);
+  const [editingIds, setEditingIds] = useState(() => new Set());  // 哪些批注卡正在展开 textarea
+  const [corrections, setCorrections] = useState(() => BP_RATING_DB.getCorrections(ep._id));
+  const [correctionModal, setCorrectionModal] = useState(null);  // null | {original, location}
+  const [findContext, setFindContext] = useState(null);  // {text, ts} 触发转录页跳转 + 高亮
+  const [expansions, setExpansions] = useState(() => BP_RATING_DB.getExpansions(ep._id));
+  const [expansionLoading, setExpansionLoading] = useState({});  // {chapter_key: true/false}
+  const [expandPendings, setExpandPendings] = useState(() => BP_RATING_DB.getExpandPending(ep._id));  // {chapter_key: {status, ...}} 跨电脑队列待办
+  // 版本切换：如果当前 ep 有 _alternateVersion 字段，可以切换到旧版（Whisper）做对比
+  const [showAlternate, setShowAlternate] = useState(false);
+  const hasAlternate = !!ep._alternateVersion;
+  const activeData = showAlternate && hasAlternate ? {
+    detailedSummary: ep._alternateVersion.detailedSummary || ep.detailedSummary,
+    briefSummary: ep._alternateVersion.briefSummary || ep.briefSummary,
+    transcriptSegments: ep._alternateVersion.transcriptSegments || ep.transcriptSegments,
+    label: ep._alternateVersion.label || "alt",
+  } : {
+    detailedSummary: ep.detailedSummary,
+    briefSummary: ep.briefSummary,
+    transcriptSegments: ep.transcriptSegments,
+    label: (ep._transcribeModel || "").includes("gpt-4o") ? "GPT-4o + 对齐" : "Whisper",
+  };
+  const textareaRefs = useRef({});
+  const summaryRef = useRef(null);
+  const hasTranscript = activeData.transcriptSegments?.length > 0;
+
+  // 打开更正 modal — 由选词工具栏 / 转录区按钮 / 都可以触发
+  const openCorrectionModal = (selectedText, location) => {
+    if (!selectedText || !selectedText.trim()) return;
+    setCorrectionModal({ original: selectedText.trim(), location });
+    // 清掉选区（避免遮挡 modal）
+    if (window.getSelection) window.getSelection().removeAllRanges();
+    setPendingSelection(null);
+  };
+  const onCorrectionApplied = () => {
+    setCorrections(BP_RATING_DB.getCorrections(ep._id));
+  };
+
+  // 🔍 章节"+ 更详细总结"请求处理
+  // 本机有 daemon → 直接调（60-90s 直接出结果）
+  // 本机没 daemon → 写云端任务队列 → 主电脑 worker 处理 → 1-3 分钟后同步过来
+  const handleExpandRequest = async ({ action, chapterKey, startSec, endSec, currentText }) => {
+    if (action === "revert") {
+      BP_RATING_DB.removeExpansion(ep._id, chapterKey);
+      BP_RATING_DB.removeExpandPending(ep._id, chapterKey);
+      setExpansions(BP_RATING_DB.getExpansions(ep._id));
+      setExpandPendings(BP_RATING_DB.getExpandPending(ep._id));
+      return;
+    }
+    // action === "expand"
+    setExpansionLoading(prev => ({ ...prev, [chapterKey]: true }));
+
+    // 1) 探测本机 daemon
+    let daemonOk = false;
+    try {
+      const probe = await fetch("http://127.0.0.1:9878/status", { method: "GET" });
+      daemonOk = probe.ok;
+    } catch { daemonOk = false; }
+
+    if (daemonOk) {
+      // 本机 daemon 可用：直接调
+      try {
+        const r = await fetch("http://127.0.0.1:9878/expand_section", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ep_id: ep._id.replace(/^preset-/, ""),
+            chapter_key: chapterKey,
+            start_sec: startSec,
+            end_sec: endSec,
+            current_text: currentText,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data.ok && data.expanded_text) {
+          BP_RATING_DB.setExpansion(ep._id, chapterKey, {
+            text: data.expanded_text,
+            model: "claude-opus-4-7",
+            start_sec: startSec,
+            end_sec: endSec,
+          });
+          // 清掉可能存在的 pending（之前在副电脑下的单）
+          BP_RATING_DB.removeExpandPending(ep._id, chapterKey);
+          setExpansions(BP_RATING_DB.getExpansions(ep._id));
+          setExpandPendings(BP_RATING_DB.getExpandPending(ep._id));
+        } else {
+          alert(`生成失败：${data.error || `HTTP ${r.status}`}`);
+        }
+      } catch (e) {
+        alert(`守护进程不可用：${e.message || e}`);
+      } finally {
+        setExpansionLoading(prev => { const n = { ...prev }; delete n[chapterKey]; return n; });
+      }
+    } else {
+      // 没本机 daemon：写云端任务队列，主电脑 worker 会拉取处理
+      BP_RATING_DB.setExpandPending(ep._id, chapterKey, {
+        ep_id: ep._id.replace(/^preset-/, ""),
+        chapter_key: chapterKey,
+        start_sec: startSec,
+        end_sec: endSec,
+        current_text: currentText,
+      });
+      setExpandPendings(BP_RATING_DB.getExpandPending(ep._id));
+      // 立即触发 backup 推送：写到云端 user_data_sync.json，主电脑 worker 看到后开始处理
+      try { BP_BACKUP.flush(); } catch {}
+      setExpansionLoading(prev => { const n = { ...prev }; delete n[chapterKey]; return n; });
+      alert("⏳ 已委托主电脑生成，预计 1-3 分钟后自动展开。\n\n（dashboard 会每 60 秒自动同步一次，无需刷新）");
+    }
+  };
+
+  // 周期性从 localStorage 重读 expansions / expand_pending
+  // 让 syncFromCloud 拉到的远端结果（如主电脑生成完的 expansion / 状态升级的 pending）能在 DetailPage 看到
+  React.useEffect(() => {
+    const refresh = () => {
+      const newExp = BP_RATING_DB.getExpansions(ep._id);
+      const newPend = BP_RATING_DB.getExpandPending(ep._id);
+      setExpansions(prev => JSON.stringify(prev) !== JSON.stringify(newExp) ? newExp : prev);
+      setExpandPendings(prev => JSON.stringify(prev) !== JSON.stringify(newPend) ? newPend : prev);
+    };
+    const t = setInterval(refresh, 8000);  // 8s 检查一次（syncFromCloud 是 60s）
+    return () => clearInterval(t);
+  }, [ep._id]);
+
+  // 🔍 查找原文：切到转录 tab + 滚到对应 segment + 短暂高亮
+  const triggerFindOriginal = (selectedText) => {
+    if (!selectedText || !selectedText.trim()) return;
+    // 清掉划词浮动栏 + 选区
+    if (window.getSelection) window.getSelection().removeAllRanges();
+    setPendingSelection(null);
+    // 切到转录 tab
+    setTab("transcript");
+    // 推一个新的 findContext（带 ts 让 TranscriptViewer 识别为新触发）
+    setFindContext({ text: selectedText.trim(), ts: Date.now() });
+  };
+
+  const addFromSelection = (withNote = false) => {
+    if (!pendingSelection?.text) return;
+    // 保存时即 strip 掉 *（旧版渲染残留），保证 localStorage 里永远不会再存带 * 的批注 text
+    const cleanText = pendingSelection.text.replace(/\*/g, "");
+    const newAnn = { id: `ann_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, text: cleanText, note: "", created: Date.now(), updated: Date.now() };
+    const updated = [newAnn, ...annotations];
+    setAnnotations(updated);
+    BP_RATING_DB.saveAnnotations(ep._id, updated);
+    if (withNote) {
+      setEditingIds(prev => { const n = new Set(prev); n.add(newAnn.id); return n; });
+      setTimeout(() => { textareaRefs.current[newAnn.id]?.focus(); }, 60);
+    }
+    // 清选区但保留浮动按钮到下次选区变化，确保用户看到"已保存"视觉反馈不会太突兀
+    if (window.getSelection) window.getSelection().removeAllRanges();
+    setPendingSelection(null);
+  };
+
+  // 检测用户在 summary 内选中文字 — 记录选区坐标用于浮动工具栏定位
+  const handleTextSelection = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) { setPendingSelection(null); return; }
+    const text = sel.toString().trim();
+    if (text.length < 3) { setPendingSelection(null); return; }
+    if (summaryRef.current && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0);
+      if (summaryRef.current.contains(range.commonAncestorContainer)) {
+        // 记录选区末端 Y/X（相对 data-ann-anchor 容器）
+        const container = summaryRef.current.closest("[data-ann-anchor]");
+        const cRect = container?.getBoundingClientRect() ?? { top: 0, left: 0 };
+        const rects = range.getClientRects();
+        const lastRect = rects.length > 0 ? rects[rects.length - 1] : range.getBoundingClientRect();
+        setPendingSelection({
+          text,
+          top: lastRect.top - cRect.top,
+          bottom: lastRect.bottom - cRect.top,
+          left: lastRect.left - cRect.left,
+          right: lastRect.right - cRect.left,
+        });
+        return;
+      }
+    }
+    setPendingSelection(null);
+  };
+  const showSidebar = tab === "summary";
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, animation: "fadeIn .25s ease" }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 50, background: "rgba(255,255,255,.95)", backdropFilter: "blur(12px)", borderBottom: `1px solid ${C.border}`, padding: "8px 24px", display: "flex", alignItems: "center", gap: 12 }}>
+        <button onClick={onBack} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>← 返回</button>
+        <span style={{ fontFamily: mno, fontSize: 10, color: C.textDim, letterSpacing: 1 }}>{ep._channelName}</span>
+        {hasTranscript && <span style={{ fontFamily: mno, fontSize: 9, color: C.accent, background: C.accentBg, padding: "1px 6px", borderRadius: 4, border: `1px solid ${C.accentBorder}` }}>✓ {activeData.transcriptSegments.length}段</span>}
+        {hasAlternate && (
+          <button onClick={() => setShowAlternate(s => !s)}
+            title={`当前 ${activeData.label} 版本，点击切换到另一版本对比`}
+            style={{ fontFamily: mno, fontSize: 9, color: showAlternate ? "#7c3aed" : C.accentDark, background: showAlternate ? "rgba(124,58,237,.1)" : C.bg, border: `1px solid ${showAlternate ? "rgba(124,58,237,.35)" : C.border}`, borderRadius: 4, padding: "1px 8px", cursor: "pointer", fontWeight: 500 }}>
+            🔄 {activeData.label}
+          </button>
+        )}
+        {annotations.length > 0 && <span style={{ fontFamily: mno, fontSize: 9, color: "#b45309", background: C.noteBg, padding: "1px 6px", borderRadius: 4, border: `1px solid ${C.noteBorder}` }}>✎ {annotations.length}条批注</span>}
+        <button onClick={() => {
+          const url = window.location.href;
+          if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(url).then(() => {
+              const el = document.getElementById("bp-share-toast");
+              if (el) { el.textContent = "✓ 链接已复制"; el.style.opacity = "1"; setTimeout(() => { el.style.opacity = "0"; }, 1800); }
+            });
+          } else {
+            window.prompt("复制下面的链接：", url);
+          }
+        }} title="复制本集的独立链接，可以发给别人" style={{ fontFamily: mno, fontSize: 10, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>🔗 复制链接</button>
+        <span id="bp-share-toast" style={{ fontFamily: mno, fontSize: 10, color: C.accent, opacity: 0, transition: "opacity .25s" }}></span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 2, background: C.surface, borderRadius: 6, padding: 2, border: `1px solid ${C.border}` }}>
+          {[{ k: "summary", l: "总结" }, { k: "transcript", l: `转录 (${hasTranscript ? ep.transcriptSegments.length + "段" : "无"})` }].map(t => (
+            <button key={t.k} onClick={() => setTab(t.k)} style={{ fontFamily: mno, fontSize: 11, padding: "4px 14px", color: tab === t.k ? C.bg : C.textSec, background: tab === t.k ? C.accent : "transparent", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: tab === t.k ? 600 : 400 }}>{t.l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 0, maxWidth: showSidebar ? 1220 : 960, margin: "0 auto" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ padding: "16px 24px 0" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
+              <h1 style={{ fontFamily: srf, fontSize: 22, fontWeight: 600, color: C.text, margin: 0, lineHeight: 1.3 }}>{ep.title}</h1>
+              <span style={{ fontFamily: mno, fontSize: 10, color: C.accentDark, whiteSpace: "nowrap" }}>{ep.date}</span>
+            </div>
+            {ep.guests?.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+              {ep.guests.map((g, i) => (
+                <span key={i} style={{ fontFamily: mno, fontSize: 10, color: C.blue, padding: "2px 8px", background: "rgba(96,168,240,.06)", border: "1px solid rgba(96,168,240,.12)", borderRadius: 4 }}>{g}{ep.guestBackgrounds?.[i] ? ` · ${ep.guestBackgrounds[i]}` : ""}</span>
+              ))}
+            </div>}
+          </div>
+          <div style={{ padding: "12px 24px 32px" }}>
+            {tab === "summary" ? (
+              <div data-ann-anchor style={{ position: "relative" }}>
+                <FormattedSummary text={activeData.detailedSummary || activeData.briefSummary} innerRef={summaryRef} onMouseUp={handleTextSelection} annotations={annotations} corrections={corrections} expansions={expansions} expansionLoading={expansionLoading} expandPendings={expandPendings} onExpandRequest={handleExpandRequest} />
+                {/* 浮动工具栏 — 跟随选区 Y 坐标，随页面滚动而滚动（因为是 absolute 定位到 data-ann-anchor 容器） */}
+                {pendingSelection && typeof pendingSelection.bottom === "number" && (
+                  <div style={{
+                    position: "absolute",
+                    top: `${pendingSelection.bottom + 6}px`,
+                    left: `${Math.max(0, Math.min(pendingSelection.right - 120, 580))}px`,
+                    zIndex: 30,
+                    display: "flex",
+                    gap: 4,
+                    background: C.bg,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 6,
+                    padding: "3px 4px",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+                  }}>
+                    <button onMouseDown={e => e.preventDefault()} onClick={() => addFromSelection(false)} title="保存批注（不写评论）" style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 5, padding: "4px 11px", cursor: "pointer", fontWeight: 600 }}>✓ 确定</button>
+                    <button onMouseDown={e => e.preventDefault()} onClick={() => addFromSelection(true)} title="添加评论" style={{ fontFamily: mno, fontSize: 11, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 5, padding: "4px 11px", cursor: "pointer", fontWeight: 600 }}>+ 评论</button>
+                    <button onMouseDown={e => e.preventDefault()} onClick={() => openCorrectionModal(pendingSelection?.text || "", "summary")} title="更正这个词的拼写（自动加入名词库）" style={{ fontFamily: mno, fontSize: 11, color: "#b45309", background: C.bg, border: "1px solid #b45309", borderRadius: 5, padding: "4px 11px", cursor: "pointer", fontWeight: 600 }}>✎ 更正</button>
+                    <button onMouseDown={e => e.preventDefault()} onClick={() => triggerFindOriginal(pendingSelection?.text || "")} title="跳转到转录页对应原文位置" style={{ fontFamily: mno, fontSize: 11, color: C.blue, background: C.bg, border: `1px solid ${C.blue}`, borderRadius: 5, padding: "4px 11px", cursor: "pointer", fontWeight: 600 }}>🔍 查找原文</button>
+                  </div>
+                )}
+                {ep.keyTopics?.length > 0 && <div style={{ marginTop: 12, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontFamily: mno, fontSize: 9, color: C.textDim, marginRight: 4 }}>话题</span>
+                  {ep.keyTopics.map((t, i) => <span key={i} style={{ fontFamily: mno, fontSize: 10, color: C.accent, background: C.accentBg, border: `1px solid ${C.accentBorder}`, padding: "2px 8px", borderRadius: 4 }}>#{t}</span>)}
+                  {ep.sourceUrl && <a href={ep.sourceUrl} target="_blank" rel="noreferrer" style={{ fontFamily: mno, fontSize: 10, color: C.blue, textDecoration: "none", marginLeft: 8 }}>原文 ↗</a>}
+                </div>}
+              </div>
+            ) : hasTranscript ? (
+              <TranscriptViewer segments={activeData.transcriptSegments} audioUrl={ep.audioUrl} corrections={corrections} onCorrect={openCorrectionModal} findContext={findContext} />
+            ) : (
+              <div style={{ textAlign: "center", padding: "60px 20px", background: C.surface, borderRadius: 12, border: `1px dashed ${C.borderLight}` }}>
+                <div style={{ fontSize: 36, marginBottom: 12, opacity: .4 }}>🎙️</div>
+                <p style={{ fontFamily: srf, fontSize: 16, color: C.textDim, margin: "0 0 8px" }}>转录处理中</p>
+                <p style={{ fontFamily: mno, fontSize: 11, color: C.textDim, lineHeight: 1.8, margin: "0 0 16px" }}>音频正在后台转录，完成后将自动显示<br/>逐段文字稿与时间戳，支持点击播放</p>
+                <Spinner size={20} />
+              </div>
+            )}
+          </div>
+        </div>
+        {showSidebar && (
+          <AnnotationSidebar ep={ep} annotations={annotations} setAnnotations={setAnnotations} summaryRef={summaryRef} editingIds={editingIds} setEditingIds={setEditingIds} textareaRefs={textareaRefs} sourceText={activeData.detailedSummary || activeData.briefSummary || ""} />
+        )}
+      </div>
+
+      {/* 更正 modal */}
+      {correctionModal && (
+        <CorrectionModal
+          epId={ep._id}
+          original={correctionModal.original}
+          location={correctionModal.location}
+          summaryText={activeData.detailedSummary || activeData.briefSummary || ""}
+          transcriptSegments={activeData.transcriptSegments || []}
+          onClose={() => setCorrectionModal(null)}
+          onApplied={onCorrectionApplied}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Channel Chip (用在频道落地页中) ───
+function ChannelChip({ ch, onRemove, onRefresh, busy, epCount = 0 }) {
+  // 朋友版：所有频道默认免费 Whisper，不允许频道级别切付费（单集付费仍可由"💰 付费转录"按钮触发）
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px" }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+          <span style={{ fontFamily: srf, fontSize: 14, color: C.text, fontWeight: 600 }}>{ch.name}</span>
+          <span style={{ fontFamily: mno, fontSize: 9, color: C.accentDark }}>{epCount} 集</span>
+        </div>
+        <div style={{ fontFamily: mno, fontSize: 10, color: C.textDim }}>
+          {ch.host ? `${ch.host} · ` : ""}{ch.type} · {ch.updateFrequency || "每周"} · 上次抓取 {timeAgo(ch.lastFetched)}
+        </div>
+        {ch.description && <div style={{ fontFamily: srf, fontSize: 12, color: C.textSec, marginTop: 4, lineHeight: 1.5 }}>{ch.description}</div>}
+      </div>
+      {ch.url && <a href={ch.url} target="_blank" rel="noreferrer" style={{ fontFamily: mno, fontSize: 10, color: C.blue, textDecoration: "none", padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: C.surface }}>小宇宙 ↗</a>}
+      <button onClick={() => onRefresh(ch.id)} disabled={busy} style={{ fontFamily: mno, fontSize: 10, color: busy ? C.textDim : C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 4, padding: "4px 10px", cursor: busy ? "not-allowed" : "pointer" }}>
+        {busy ? "…" : "刷新"}
+      </button>
+      <button onClick={() => onRemove(ch.id)} title="取消追踪" style={{ fontFamily: mno, fontSize: 14, color: C.textDim, background: "none", border: "none", cursor: "pointer", padding: "0 4px" }}>✕</button>
+    </div>
+  );
+}
+
+// ─── Channels Page (追踪频道落地页) ───
+function ChannelsPage({ channels, episodes, onBack, onRemove, onRefresh, onAdd, busyId }) {
+  const countByChannel = {};
+  for (const ep of episodes) {
+    const k = ep._channelId;
+    countByChannel[k] = (countByChannel[k] || 0) + 1;
+  }
+  // 朋友版：月度付费转录预算显示（每月 $10 上限，每月 1 号自动 reset）
+  const [budget, setBudget] = React.useState(null);
+  React.useEffect(() => {
+    fetch("http://127.0.0.1:9878/budget_status").then(r => r.json()).then(setBudget).catch(() => setBudget(null));
+    const t = setInterval(() => {
+      fetch("http://127.0.0.1:9878/budget_status").then(r => r.json()).then(setBudget).catch(() => {});
+    }, 60000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, animation: "fadeIn .25s ease" }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 50, background: "rgba(255,255,255,.95)", backdropFilter: "blur(12px)", borderBottom: `1px solid ${C.border}`, padding: "8px 24px", display: "flex", alignItems: "center", gap: 12 }}>
+        <button onClick={onBack} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>← 返回</button>
+        <h1 style={{ fontFamily: srf, fontSize: 18, fontWeight: 600, color: C.text, margin: 0 }}>追踪频道</h1>
+        <span style={{ fontFamily: mno, fontSize: 9, color: C.textDim, letterSpacing: 1 }}>共 {channels.length} 个</span>
+        {budget && <span title={`本月付费转录已花 $${budget.spent_usd?.toFixed(2)} / $${budget.budget_usd?.toFixed(2)}（${budget.txn_count} 次），${budget.month} 1 号自动 reset`}
+          style={{ fontFamily: mno, fontSize: 10, color: budget.remaining_usd < 2 ? "#c0392b" : (budget.remaining_usd < 5 ? "#b8860b" : C.textSec),
+                   background: budget.remaining_usd < 2 ? "rgba(192,57,43,.08)" : (budget.remaining_usd < 5 ? "rgba(184,134,11,.08)" : C.surface),
+                   border: `1px solid ${C.border}`, borderRadius: 4, padding: "3px 8px" }}>
+          💰 本月预算 ${budget.spent_usd?.toFixed(2)} / ${budget.budget_usd?.toFixed(2)}
+        </span>}
+        <button onClick={onAdd} style={{ marginLeft: "auto", fontFamily: mno, fontSize: 10, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontWeight: 500 }}>+ 添加频道</button>
+      </div>
+      <main style={{ padding: "18px 24px 40px", maxWidth: 960, margin: "0 auto" }}>
+        {channels.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "60px 20px", background: C.surface, borderRadius: 12, border: `1px dashed ${C.borderLight}` }}>
+            <p style={{ fontFamily: srf, fontSize: 15, color: C.textDim, margin: 0 }}>还没有追踪的频道，点右上角"+ 添加频道"开始</p>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {channels.map(ch => <ChannelChip key={ch.id} ch={ch} onRemove={onRemove} onRefresh={onRefresh} busy={busyId === ch.id} epCount={countByChannel[ch.id] || 0} />)}
+          </div>
+        )}
+        <div style={{ marginTop: 20, padding: "12px 14px", background: C.surface, borderRadius: 8, border: `1px solid ${C.border}`, fontFamily: srf, fontSize: 13, color: C.textSec, lineHeight: 1.6 }}>
+          <div style={{ fontFamily: mno, fontSize: 10, color: C.textDim, letterSpacing: 1, marginBottom: 6, textTransform: "uppercase" }}>说明</div>
+          添加的频道会同步到本地 daemon，每天凌晨 2:00 + 下午 16:00 自动抓取该频道最新内容；早 8:30 + 晚 18:00 自动推送评分简报。取消追踪只会从页面移除，已转录的历史集不会被删除。
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// ─── Add Modal (search-based) ───
+// Lazy-loaded podcast catalog (5100 entries from xyzrank, ~413KB JSON)
+let _catalogCache = null;
+async function loadPodcastCatalog() {
+  if (_catalogCache) return _catalogCache;
+  try {
+    const base = document.baseURI || location.href;
+    const jsonUrl = new URL("podcast_catalog.json", base).href;
+    const r = await fetch(jsonUrl);
+    _catalogCache = await r.json();
+    return _catalogCache;
+  } catch (e) { return []; }
+}
+
+function AddModal({ onClose, onAdded }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [showManual, setShowManual] = useState(false);
+  const [manualName, setManualName] = useState("");
+  const [manualUrl, setManualUrl] = useState("");
+  const [manualHost, setManualHost] = useState("");
+  const [catalogReady, setCatalogReady] = useState(!!_catalogCache);
+
+  // Pre-load catalog when modal opens
+  useEffect(() => { loadPodcastCatalog().then(() => setCatalogReady(true)); }, []);
+
+  const doSearch = useCallback(async () => {
+    const q = query.trim().toLowerCase();
+    if (!q) return;
+    setSearching(true);
+    setSelected(null);
+    const catalog = await loadPodcastCatalog();
+    const keywords = q.split(/\s+/).filter(Boolean);
+    const matches = catalog.filter(p => {
+      const text = `${p.n} ${p.a} ${p.g}`.toLowerCase();
+      return keywords.every(kw => text.includes(kw));
+    }).map(p => ({ name: p.n, author: p.a, genre: p.g, pid: p.p, rank: p.r, url: `https://www.xiaoyuzhoufm.com/podcast/${p.p}` }));
+    // Sort: exact name match first, then by rank
+    matches.sort((a, b) => {
+      const aEx = a.name.toLowerCase().includes(q) ? 0 : 1;
+      const bEx = b.name.toLowerCase().includes(q) ? 0 : 1;
+      return aEx !== bEx ? aEx - bEx : a.rank - b.rank;
+    });
+    setResults(matches.slice(0, 15));
+    setSearching(false);
+  }, [query]);
+
+  const handleAdd = useCallback(() => {
+    if (showManual) {
+      if (!manualName.trim()) return;
+      onAdded({ id: Date.now().toString(), name: manualName.trim(), type: "podcast", description: "", url: manualUrl.trim(), host: manualHost.trim(), updateFrequency: "每周", lastFetched: null });
+    } else if (selected) {
+      onAdded({ id: selected.pid || Date.now().toString(), name: selected.name, type: "podcast", description: selected.genre || "", url: selected.url || `https://www.xiaoyuzhoufm.com/podcast/${selected.pid}`, host: selected.author || "", updateFrequency: "每周", lastFetched: null });
+    }
+    onClose();
+  }, [selected, showManual, manualName, manualUrl, manualHost, onAdded, onClose]);
+
+  const canAdd = showManual ? manualName.trim().length > 0 : !!selected;
+  const inputStyle = { fontFamily: mno, fontSize: 12, color: C.text, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 10px", outline: "none", width: "100%", boxSizing: "border-box" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeIn .15s ease" }}>
+      <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.3)", backdropFilter: "blur(6px)" }} />
+      <div style={{ position: "relative", width: "min(480px,94vw)", maxHeight: "85vh", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "18px 22px", animation: "scaleIn .2s ease", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <h3 style={{ fontFamily: srf, fontSize: 18, fontWeight: 600, color: C.text, margin: 0 }}>添加追踪频道</h3>
+          <button onClick={() => setShowManual(!showManual)} style={{ fontFamily: mno, fontSize: 10, color: C.accent, background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>{showManual ? "搜索添加" : "手动输入"}</button>
+        </div>
+        <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: "0 0 12px" }}>搜索播客名称、主持人或分类 (覆盖5000+播客){!catalogReady && !showManual ? " · 加载榜单中..." : ""}</p>
+
+        {showManual ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            <input value={manualName} onChange={e => setManualName(e.target.value)} placeholder="频道名称 *" style={inputStyle} />
+            <input value={manualUrl} onChange={e => setManualUrl(e.target.value)} placeholder="小宇宙链接 (可选)" style={inputStyle} />
+            <input value={manualHost} onChange={e => setManualHost(e.target.value)} placeholder="主持人 (可选)" style={inputStyle} />
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+              <input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && doSearch()} placeholder="输入关键词搜索，如: 商业、科技、硅谷..." style={{ ...inputStyle, flex: 1 }} autoFocus />
+              <button onClick={doSearch} disabled={searching || !query.trim()} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 14px", cursor: query.trim() ? "pointer" : "not-allowed", fontWeight: 500, opacity: query.trim() ? 1 : .5, whiteSpace: "nowrap" }}>{searching ? "搜索中..." : "搜索"}</button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", minHeight: 0, maxHeight: "50vh", marginBottom: 10 }}>
+              {results.length === 0 && !searching && query && (
+                <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim, textAlign: "center", padding: "20px 0" }}>未找到匹配结果，试试其他关键词或手动输入</div>
+              )}
+              {results.length === 0 && !query && (
+                <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim, textAlign: "center", padding: "20px 0" }}>输入关键词搜索热门播客榜单</div>
+              )}
+              {results.map((p, i) => {
+                const isSel = selected && selected.pid === p.pid;
+                return (
+                  <div key={p.pid || i} onClick={() => setSelected(isSel ? null : p)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", marginBottom: 2, borderRadius: 6, cursor: "pointer", border: `1.5px solid ${isSel ? C.accent : "transparent"}`, background: isSel ? C.accentBg : "transparent", transition: "all .12s" }}>
+                    {p.logo ? <img src={p.logo} style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 32, height: 32, borderRadius: 6, background: C.surface, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>🎙</div>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: mno, fontSize: 12, fontWeight: 500, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                      <div style={{ fontFamily: mno, fontSize: 10, color: C.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.author}{p.genre ? ` · ${p.genre}` : ""}</div>
+                    </div>
+                    {p.rank > 0 && <span style={{ fontFamily: mno, fontSize: 10, color: C.accent, fontWeight: 600, flexShrink: 0 }}>#{p.rank}</span>}
+                    {p.source === "search" && <span style={{ fontFamily: mno, fontSize: 9, color: C.textDim, background: C.surface, borderRadius: 3, padding: "1px 4px", flexShrink: 0 }}>搜索</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+          <button onClick={onClose} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 16px", cursor: "pointer" }}>取消</button>
+          <button disabled={!canAdd} onClick={handleAdd} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 16px", cursor: canAdd ? "pointer" : "not-allowed", fontWeight: 500, opacity: canAdd ? 1 : .5 }}>确认添加</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Add Single Episode Modal ───
+// 增加单集（不 track 整个频道）— 粘贴小宇宙 episode 链接 / 在 xyzrank 单集榜里搜索
+// 提交后：
+//   1) 写入 localStorage `bp_pending_episodes`（用户可见、可重发）
+//   2) POST 到本地守护进程 http://127.0.0.1:9878/episode（写入 pending_episodes.json）
+//   3) 下次 pipeline 跑时会处理这些待办单集
+//
+// 数据源：
+//   - xyzrank.eddiehe.top/hot_episodes.json — 中文播客单集热度榜（CORS-open）
+//   - hot_episodes_new.json — 新势力单集
+//   两者合并去重 → 共数千条候选 episode，按 postTime/playCount 排序
+let _xyzEpisodesCache = null;
+async function loadXyzHotEpisodes() {
+  if (_xyzEpisodesCache) return _xyzEpisodesCache;
+  const urls = [
+    "https://xyzrank.eddiehe.top/hot_episodes.json",
+    "https://xyzrank.eddiehe.top/hot_episodes_new.json",
+  ];
+  const all = [];
+  for (const u of urls) {
+    try {
+      const r = await fetch(u);
+      if (!r.ok) continue;
+      const data = await r.json();
+      // 实际 schema: { data: { episodes: [...] } }
+      // 容错：也尝试常见变体（顶层数组 / items / episodes / data 是数组）
+      let items = [];
+      if (Array.isArray(data)) items = data;
+      else if (Array.isArray(data?.episodes)) items = data.episodes;
+      else if (Array.isArray(data?.items)) items = data.items;
+      else if (Array.isArray(data?.data)) items = data.data;
+      else if (Array.isArray(data?.data?.episodes)) items = data.data.episodes;
+      else if (Array.isArray(data?.data?.items)) items = data.data.items;
+      for (const it of items) all.push(it);
+    } catch (e) {
+      // ignore single-file failure, keep what we got
+    }
+  }
+  // 去重（按 link 中的 episode id）
+  const seen = new Set();
+  const dedup = [];
+  for (const it of all) {
+    const m = (it.link || "").match(/\/episode\/([0-9a-fA-F]{20,32})/);
+    const eid = m ? m[1] : "";
+    if (!eid || seen.has(eid)) continue;
+    seen.add(eid);
+    dedup.push({ ...it, _eid: eid });
+  }
+  // 按发布时间倒序（最新优先）
+  dedup.sort((a, b) => (b.postTime || "").localeCompare(a.postTime || ""));
+  _xyzEpisodesCache = dedup;
+  return dedup;
+}
+
+function AddEpisodeModal({ onClose, onAdded }) {
+  const [tab, setTab] = useState("link"); // "link" | "search"
+  const [url, setUrl] = useState("");
+  const [title, setTitle] = useState("");
+  const [note, setNote] = useState("");
+  // 搜索 —— 双数据源：
+  //   1) xyzrank hot_episodes（前端直 fetch，覆盖全网热门）
+  //   2) 本地 daemon /search_episodes（按需 scrape 单个频道近期 15 集，覆盖任何已追踪频道 + catalog 命中频道）
+  const [query, setQuery] = useState("");
+  const [episodeCatalog, setEpisodeCatalog] = useState(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [daemonResults, setDaemonResults] = useState([]);
+  const [daemonSearching, setDaemonSearching] = useState(false);
+  const [daemonAvailable, setDaemonAvailable] = useState(null); // null=未知 true/false=已检测
+
+  // xiaoyuzhou episode URL: /episode/{24-char hex} 或 /episode/{20+ char hex}
+  const extractEpId = (u) => {
+    if (!u) return "";
+    const m = u.match(/\/episode\/([0-9a-fA-F]{20,32})/);
+    return m ? m[1] : "";
+  };
+  const epId = useMemo(() => extractEpId(url), [url]);
+  const canSubmit = tab === "link" ? !!epId : false;
+
+  // 切到搜索 tab 时：a) 懒加载 xyzrank hot_episodes b) 探测 daemon 是否在线
+  useEffect(() => {
+    if (tab !== "search") return;
+    if (!episodeCatalog && !catalogLoading) {
+      setCatalogLoading(true);
+      setCatalogError("");
+      loadXyzHotEpisodes()
+        .then(list => { setEpisodeCatalog(list); setCatalogLoading(false); })
+        .catch(e => { setCatalogError(String(e)); setCatalogLoading(false); });
+    }
+    if (daemonAvailable === null) {
+      fetch("http://127.0.0.1:9878/status").then(r => r.ok).catch(() => false)
+        .then(ok => setDaemonAvailable(!!ok));
+    }
+  }, [tab, episodeCatalog, catalogLoading, daemonAvailable]);
+
+  // query 变化时（>=2 字符）→ 触发 daemon 搜索（debounced 350ms）
+  useEffect(() => {
+    if (tab !== "search" || !daemonAvailable || !query.trim() || query.trim().length < 2) {
+      setDaemonResults([]);
+      return;
+    }
+    const handle = setTimeout(async () => {
+      setDaemonSearching(true);
+      try {
+        const r = await fetch(`http://127.0.0.1:9878/search_episodes?q=${encodeURIComponent(query.trim())}`);
+        if (r.ok) {
+          const data = await r.json();
+          setDaemonResults(Array.isArray(data) ? data : []);
+        }
+      } catch {}
+      setDaemonSearching(false);
+    }, 350);
+    return () => clearTimeout(handle);
+  }, [query, tab, daemonAvailable]);
+
+  // 合并两个数据源：daemon 结果 + xyzrank hot 结果，按 eid 去重
+  const searchResults = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+
+    const seen = new Set();
+    const merged = [];
+
+    // daemon 结果优先（更全面，已经过滤）
+    for (const e of daemonResults) {
+      const eid = e._eid || (e.link || "").match(/\/episode\/([0-9a-fA-F]{20,32})/)?.[1];
+      if (!eid || seen.has(eid)) continue;
+      seen.add(eid);
+      merged.push({ ...e, _eid: eid, _src: "daemon" });
+    }
+
+    // xyzrank hot 结果补充
+    if (episodeCatalog) {
+      for (const e of episodeCatalog) {
+        const eid = e._eid;
+        if (!eid || seen.has(eid)) continue;
+        const t = (e.title || "").toLowerCase();
+        const p = (e.podcastName || "").toLowerCase();
+        if (t.includes(q) || p.includes(q)) {
+          seen.add(eid);
+          merged.push({ ...e, _src: "xyzrank" });
+          if (merged.length >= 80) break;
+        }
+      }
+    }
+
+    // 按发布日期倒序
+    merged.sort((a, b) => (b.postTime || b._date || "").localeCompare(a.postTime || a._date || ""));
+    return merged.slice(0, 50);
+  }, [episodeCatalog, query, daemonResults]);
+
+  const pickFromSearch = (ep) => {
+    setUrl(ep.link || "");
+    setTitle(ep.title || "");
+    setTab("link"); // 跳到链接 tab 让用户看到识别结果再确认
+  };
+
+  const handleSubmit = async () => {
+    if (!epId) return;
+    const item = {
+      episode_id: epId,
+      url: url.trim(),
+      title: title.trim(),
+      note: note.trim(),
+      status: "pending",
+      requested_at: new Date().toISOString(),
+    };
+    BP_RATING_DB.addPendingEpisode(item);
+    let synced = false;
+    try {
+      const r = await fetch("http://127.0.0.1:9878/episode", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(item),
+      });
+      synced = r.ok;
+    } catch {}
+    onAdded(item, synced);
+    onClose();
+  };
+
+  const inputStyle = { fontFamily: mno, fontSize: 12, color: C.text, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 10px", outline: "none", width: "100%", boxSizing: "border-box" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeIn .15s ease" }}>
+      <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.3)", backdropFilter: "blur(6px)" }} />
+      <div style={{ position: "relative", width: "min(520px,94vw)", maxHeight: "85vh", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "18px 22px", animation: "scaleIn .2s ease", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <h3 style={{ fontFamily: srf, fontSize: 18, fontWeight: 600, color: C.text, margin: 0 }}>添加单集博客</h3>
+        </div>
+        <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: "0 0 12px" }}>只处理这一集 · 不会把整个频道加进追踪列表</p>
+
+        {/* Tab 切换 */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 12, background: C.surface, padding: 3, borderRadius: 6, border: `1px solid ${C.border}`, alignSelf: "flex-start" }}>
+          {[{ k: "link", l: "粘贴链接" }, { k: "search", l: "搜索博客" }].map(t => (
+            <button key={t.k} onClick={() => setTab(t.k)} style={{ fontFamily: mno, fontSize: 11, padding: "4px 14px", color: tab === t.k ? C.bg : C.textSec, background: tab === t.k ? C.accent : "transparent", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: tab === t.k ? 600 : 400 }}>{t.l}</button>
+          ))}
+        </div>
+
+        {tab === "link" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontFamily: mno, fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>小宇宙单集链接 *</label>
+              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://www.xiaoyuzhoufm.com/episode/..." style={inputStyle} autoFocus />
+              {url && !epId && <div style={{ fontFamily: mno, fontSize: 10, color: "#c0392b", marginTop: 4 }}>无法识别 episode id，请检查链接</div>}
+              {epId && <div style={{ fontFamily: mno, fontSize: 10, color: C.accent, marginTop: 4 }}>✓ 已识别 episode id: {epId.slice(0, 12)}…</div>}
+            </div>
+            <div>
+              <label style={{ fontFamily: mno, fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>标题（可选 · 帮助记忆）</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="比如：和广密聊 Coding 第二幕" style={inputStyle} />
+            </div>
+            <div>
+              <label style={{ fontFamily: mno, fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>备注（可选）</label>
+              <input value={note} onChange={e => setNote(e.target.value)} placeholder="为什么想看这一集？" style={inputStyle} />
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12, minHeight: 0 }}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+              <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: 0, lineHeight: 1.6, flex: 1 }}>
+                综合搜索：<a href="https://xyzrank.com/?from=itab#/hot-episodes" target="_blank" rel="noreferrer" style={{ color: C.blue, textDecoration: "none" }}>中文播客榜热度</a> + 已追踪频道近期单集
+                {daemonAvailable === false && <span style={{ color: "#c0392b" }}> · ⚠️ 守护进程离线（仅热度榜）</span>}
+              </p>
+              {(catalogLoading || daemonSearching) && <span style={{ fontFamily: mno, fontSize: 10, color: C.textDim }}>搜索中…</span>}
+            </div>
+            <input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索单集，如：广密、AI for Math、张小珺..." style={inputStyle} autoFocus />
+            {catalogError && (
+              <div style={{ fontFamily: mno, fontSize: 10, color: "#c0392b" }}>加载榜单失败：{catalogError.slice(0, 80)}</div>
+            )}
+            {searchResults.length > 0 && (
+              <div style={{ maxHeight: 320, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                {searchResults.map((e, i) => (
+                  <div key={e._eid} onClick={() => pickFromSearch(e)}
+                       style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderBottom: i < searchResults.length - 1 ? `1px solid ${C.border}` : "none", cursor: "pointer", transition: "background .12s" }}
+                       onMouseEnter={ev => ev.currentTarget.style.background = C.surface}
+                       onMouseLeave={ev => ev.currentTarget.style.background = "transparent"}>
+                    {e.logoURL ? <img src={e.logoURL} style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 32, height: 32, borderRadius: 6, background: C.surface, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>🎙</div>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: mno, fontSize: 12, fontWeight: 500, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.title}</div>
+                      <div style={{ fontFamily: mno, fontSize: 10, color: C.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {e.podcastName} · {e.duration ? `${e.duration} 分钟` : ""} · {(e.postTime || e._date || "").slice(0, 10)}
+                        {e.playCount ? ` · ${e.playCount > 10000 ? (e.playCount/10000).toFixed(1) + "万" : e.playCount} 播放` : ""}
+                      </div>
+                    </div>
+                    <span style={{ fontFamily: mno, fontSize: 10, color: C.accent, flexShrink: 0, fontWeight: 500 }}>选中 →</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {query && !catalogLoading && !daemonSearching && searchResults.length === 0 && (
+              <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim, textAlign: "center", padding: "16px 0" }}>
+                没找到匹配的单集{daemonAvailable === false ? "（守护进程离线，仅搜索了热度榜）" : ""} — 可以去 <a href={`https://xyzrank.com/?from=itab#/hot-episodes`} target="_blank" rel="noreferrer" style={{ color: C.blue }}>xyzrank</a> 找一下，或直接贴链接
+              </div>
+            )}
+            {!query && !catalogLoading && (
+              <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim, textAlign: "center", padding: "16px 0" }}>
+                输入关键词开始搜索
+                {daemonAvailable === true && <div style={{ fontSize: 9, marginTop: 4, color: C.accent }}>✓ 守护进程在线 · 搜索覆盖已追踪频道近期单集</div>}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+          <span style={{ fontFamily: mno, fontSize: 9, color: C.textDim }}>提交后会进入待处理队列，下次自动转录会处理</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 16px", cursor: "pointer" }}>取消</button>
+            <button disabled={!canSubmit} onClick={handleSubmit} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 16px", cursor: canSubmit ? "pointer" : "not-allowed", fontWeight: 500, opacity: canSubmit ? 1 : .5 }}>加入队列</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Preset Data ───
+// 预置追踪的频道（与 blogpulse/channels.json 保持同步）
+const PRESET_CHANNELS = [];  // 朋友版：初始无频道，自己加
+
+// EP135 transcript data (233 merged paragraphs from Whisper transcription)
+const PRESET_EPISODES = [];  // 朋友版：初始无 ep（episodes_index.json 占位）
+
+// ─── Data Backup & Restore Modal ───
+// 用户的评分 / 已读 / 批注 都存在浏览器 localStorage（bp_* keys）
+// 这个 Modal 提供：
+//   1) 当前数据状态（哪些 key、多大、几条）
+//   2) 导出 .json 文件（手动备份）
+//   3) 导入 .json 文件（手动恢复）
+//   4) 守护进程备份历史 — 时间倒序，可预览/恢复
+//   5) localStorage 滚动 snapshot 历史（守护进程离线时的备用）
+//   6) 全 localStorage 扫描（用来排查"数据是不是存在别的 key 下了"）
+function DataBackupModal({ onClose }) {
+  const [tab, setTab] = useState("status"); // status / daemon / local / scan
+  const [diagnosis, setDiagnosis] = useState([]);
+  const [daemonBackups, setDaemonBackups] = useState(null); // null=未拉取 [] / [...]
+  const [scanExpanded, setScanExpanded] = useState({}); // 全部扫描里展开的 key
+  const [deepFound, setDeepFound] = useState(null); // 深度搜索结果（null=未运行）
+  const [daemonStatus, setDaemonStatus] = useState(null);
+  const [localHistory, setLocalHistory] = useState([]);
+  const [previewData, setPreviewData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const fileInputRef = useRef(null);
+
+  const refresh = () => {
+    setDiagnosis(BP_RATING_DB.diagnose());
+    setLocalHistory(BP_BACKUP.getLocalHistory());
+  };
+  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    if (tab !== "daemon" || daemonBackups !== null) return;
+    fetch("http://127.0.0.1:9878/status").then(r => r.json()).then(s => setDaemonStatus(s)).catch(() => setDaemonStatus(null));
+    fetch("http://127.0.0.1:9878/backups").then(r => r.json()).then(d => setDaemonBackups(Array.isArray(d) ? d : [])).catch(() => setDaemonBackups([]));
+  }, [tab, daemonBackups]);
+
+  const handleExport = () => {
+    const payload = BP_RATING_DB.exportAll();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `blogpulse_backup_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg("✓ 已导出当前数据到下载文件夹");
+  };
+  const handleImportFile = (file, mode) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const payload = JSON.parse(reader.result);
+        const r = BP_RATING_DB.importAll(payload, mode);
+        BP_BACKUP.flush();
+        setMsg(`✓ 导入完成：写入 ${r.written} 个 key，跳过 ${r.skipped}（${mode === "smart" ? "智能合并" : mode === "merge" ? "仅补缺" : "全覆盖"}）`);
+        refresh();
+      } catch (e) {
+        setMsg(`✗ 导入失败：${e.message}`);
+      }
+    };
+    reader.readAsText(file);
+  };
+  const handleRestoreFromDaemon = async (name, mode) => {
+    setBusy(true);
+    try {
+      const r = await fetch(`http://127.0.0.1:9878/backup?name=${encodeURIComponent(name)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const payload = await r.json();
+      setPreviewData({ name, payload, mode });
+    } catch (e) {
+      setMsg(`✗ 读取失败：${e.message}`);
+    }
+    setBusy(false);
+  };
+  const handleRestoreFromLocalSnapshot = (snap, mode) => {
+    setPreviewData({ name: `本地 snapshot · ${new Date(snap.ts).toLocaleString()}`, payload: { ts: snap.ts, data: snap.data }, mode });
+  };
+  const confirmRestore = () => {
+    if (!previewData) return;
+    const r = BP_RATING_DB.importAll(previewData.payload, previewData.mode);
+    BP_BACKUP.flush();
+    setMsg(`✓ 恢复完成：写入 ${r.written} 个 key，跳过 ${r.skipped}`);
+    setPreviewData(null);
+    refresh();
+  };
+
+  const fmtSize = (b) => b > 1024 ? `${(b/1024).toFixed(1)} KB` : `${b} B`;
+  const tabBtnStyle = (k) => ({ fontFamily: mno, fontSize: 11, padding: "5px 12px", color: tab === k ? C.bg : C.textSec, background: tab === k ? C.accent : "transparent", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: tab === k ? 600 : 400 });
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeIn .15s ease" }}>
+      <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)" }} />
+      <div style={{ position: "relative", width: "min(680px,96vw)", maxHeight: "90vh", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "18px 22px", animation: "scaleIn .2s ease", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <h3 style={{ fontFamily: srf, fontSize: 18, fontWeight: 600, color: C.text, margin: 0 }}>数据备份与恢复</h3>
+          <button onClick={onClose} style={{ fontFamily: mno, fontSize: 14, color: C.textDim, background: "none", border: "none", cursor: "pointer", padding: 0 }}>✕</button>
+        </div>
+        <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: "0 0 12px", lineHeight: 1.6 }}>评分 / 已读 / 批注 / 待处理单集都存在浏览器 localStorage 里。每次修改自动同步到本地守护进程文件夹（防丢）。</p>
+
+        <div style={{ display: "flex", gap: 4, marginBottom: 12, background: C.surface, padding: 3, borderRadius: 6, border: `1px solid ${C.border}`, alignSelf: "flex-start" }}>
+          <button onClick={() => setTab("status")} style={tabBtnStyle("status")}>当前状态</button>
+          <button onClick={() => setTab("daemon")} style={tabBtnStyle("daemon")}>守护进程历史</button>
+          <button onClick={() => setTab("local")} style={tabBtnStyle("local")}>本地 snapshot</button>
+          <button onClick={() => setTab("scan")} style={tabBtnStyle("scan")}>全部扫描</button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0, marginBottom: 12 }}>
+          {tab === "status" && (
+            <div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                <button onClick={handleExport} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 500 }}>⬇ 导出 .json 备份</button>
+                <input ref={fileInputRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={e => {
+                  const f = e.target.files?.[0]; if (!f) return;
+                  const mode = window.confirm("智能合并：保留你现有数据，从备份中补充缺失项（推荐）？\n\n点【确定】= 智能合并\n点【取消】= 全部覆盖（旧数据会丢）") ? "smart" : "replace";
+                  handleImportFile(f, mode); e.target.value = "";
+                }} />
+                <button onClick={() => fileInputRef.current?.click()} style={{ fontFamily: mno, fontSize: 11, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 500 }}>⬆ 从 .json 导入</button>
+                <button onClick={() => { BP_BACKUP.flush(); setMsg("✓ 已强制同步到守护进程"); }} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 14px", cursor: "pointer" }}>🔄 立即同步到守护进程</button>
+              </div>
+
+              {/* bp_ keys 状态表 */}
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "200px 80px 1fr", gap: 8, padding: "6px 10px", background: C.surface, fontFamily: mno, fontSize: 10, fontWeight: 600, color: C.textSec, borderBottom: `1px solid ${C.border}` }}>
+                  <span>localStorage Key</span><span style={{ textAlign: "right" }}>大小</span><span>内容</span>
+                </div>
+                {diagnosis.filter(d => d.key.startsWith("bp_") || d.key.startsWith("bp-")).map(d => (
+                  <div key={d.key} style={{ display: "grid", gridTemplateColumns: "200px 80px 1fr", gap: 8, padding: "5px 10px", fontFamily: mno, fontSize: 11, color: C.text, borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.key}</span>
+                    <span style={{ textAlign: "right", color: C.textDim }}>{fmtSize(d.size)}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.textSec }}>{d.summary}</span>
+                  </div>
+                ))}
+                {diagnosis.filter(d => d.key.startsWith("bp_") || d.key.startsWith("bp-")).length === 0 && (
+                  <div style={{ padding: "20px", textAlign: "center", fontFamily: mno, fontSize: 11, color: C.textDim }}>没有任何 bp_ 数据 — 这是新浏览器/profile？建议从守护进程或文件恢复</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "daemon" && (
+            <div>
+              <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: "0 0 10px", lineHeight: 1.6 }}>
+                每次修改自动 POST 完整快照到 <code style={{ background: C.surface, padding: "1px 4px", borderRadius: 3 }}>blogpulse/user_data_backups/</code>。
+                <b style={{ color: C.text }}> latest.json + daily_*.json 永久保留</b>（每天一份，10 年也不到 1 GB）·
+                snapshot_*.json（每小时一份）保留 1 年。
+                因为每份是 *完整快照*，你现存的笔记永远都在最新的 daily 文件里。
+              </p>
+              {daemonStatus === null && <div style={{ fontFamily: mno, fontSize: 11, color: "#c0392b", padding: "12px 0" }}>⚠️ 无法连接守护进程（http://127.0.0.1:9878）— 请确认 daemon.pyw 在跑</div>}
+              {daemonStatus && daemonBackups !== null && (
+                <>
+                  <div style={{ fontFamily: mno, fontSize: 10, color: C.accent, marginBottom: 10 }}>✓ 守护进程在线 · 备份文件夹有 {daemonBackups.length} 份</div>
+                  {daemonBackups.length === 0 && <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim, padding: "12px 0" }}>还没有任何备份 — 修改一次数据（评分/批注/已读）就会触发首次备份</div>}
+                  <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden", maxHeight: 400, overflowY: "auto" }}>
+                    {daemonBackups.map(b => (
+                      <div key={b.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderBottom: `1px solid ${C.border}` }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontFamily: mno, fontSize: 11, color: C.text }}>{b.name}</div>
+                          <div style={{ fontFamily: mno, fontSize: 9, color: C.textDim }}>{new Date(b.mtime).toLocaleString()} · {fmtSize(b.size)}</div>
+                        </div>
+                        <button onClick={() => handleRestoreFromDaemon(b.name, "smart")} disabled={busy} style={{ fontFamily: mno, fontSize: 10, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer" }}>预览/恢复</button>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === "local" && (
+            <div>
+              <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: "0 0 10px", lineHeight: 1.6 }}>
+                浏览器内最近 20 份滚动 snapshot（守护进程离线时的备用恢复点）。
+              </p>
+              {localHistory.length === 0 && <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim, padding: "12px 0" }}>还没有 snapshot — 修改一次数据就会触发首次保存</div>}
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden" }}>
+                {localHistory.map((s, i) => (
+                  <div key={s.ts} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderBottom: i < localHistory.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontFamily: mno, fontSize: 11, color: C.text }}>{new Date(s.ts).toLocaleString()}</div>
+                      <div style={{ fontFamily: mno, fontSize: 9, color: C.textDim }}>{Object.keys(s.data || {}).length} 个 key</div>
+                    </div>
+                    <button onClick={() => handleRestoreFromLocalSnapshot(s, "smart")} style={{ fontFamily: mno, fontSize: 10, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer" }}>预览/恢复</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === "scan" && (
+            <div>
+              <p style={{ fontFamily: mno, fontSize: 10, color: C.textDim, margin: "0 0 10px", lineHeight: 1.6 }}>
+                扫描浏览器全部 localStorage（包括非 bp_ key）。点行展开看内容，或用下面的"深度搜索笔记"在 *所有 value* 内查找笔记/评分形状的数据。
+              </p>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                <button onClick={() => {
+                  // 深度搜索：扫每个 key 的 value，找批注/已读/评分 形状的数据
+                  const found = [];
+                  for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    const v = localStorage.getItem(k) || "";
+                    if (!v) continue;
+                    // 形状 1：批注 — 有 "text":"..." + "note":"..." 同时出现
+                    const annMatches = v.match(/"text":"[^"]{3,}"[^}]*"note":"/g);
+                    if (annMatches) found.push({ k, kind: "批注 (annotation)", count: annMatches.length });
+                    // 形状 2：已读 — "readAt":数字
+                    const readMatches = v.match(/"readAt":\d{10,}/g);
+                    if (readMatches) found.push({ k, kind: "已读 (read marker)", count: readMatches.length });
+                    // 形状 3：评分对象 — "preset-ep_xxx":1/2/3 的模式
+                    const ratingMatches = v.match(/"preset-[^"]+":[123]\b/g);
+                    if (ratingMatches) found.push({ k, kind: "评分 (rating)", count: ratingMatches.length });
+                  }
+                  setDeepFound(found);
+                }} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 500 }}>🔍 深度搜索笔记/评分/已读形状</button>
+                {Object.keys(scanExpanded).length > 0 && <button onClick={() => setScanExpanded({})} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 14px", cursor: "pointer" }}>收起全部</button>}
+              </div>
+              {deepFound !== null && (
+                <div style={{ marginBottom: 10, padding: "10px 12px", background: deepFound.length ? "#fef9ed" : C.surface, border: `1px solid ${deepFound.length ? "#f0d294" : C.border}`, borderRadius: 6 }}>
+                  {deepFound.length === 0
+                    ? <span style={{ fontFamily: mno, fontSize: 11, color: C.textDim }}>✓ 全部 value 扫描完毕，没有发现批注/已读/评分形状的数据藏在别的 key 里</span>
+                    : <div>
+                        <div style={{ fontFamily: mno, fontSize: 11, color: "#7a4f0f", fontWeight: 600, marginBottom: 6 }}>⚠️ 发现 {deepFound.length} 处疑似用户数据藏在 value 内：</div>
+                        {deepFound.map((f, i) => (
+                          <div key={i} style={{ fontFamily: mno, fontSize: 11, color: "#7a4f0f", padding: "2px 0" }}>
+                            • <code>{f.k}</code> 内含 <b>{f.count}</b> 条 {f.kind} → 点下方该 key 的"展开"看具体内容
+                          </div>
+                        ))}
+                      </div>
+                  }
+                </div>
+              )}
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden", maxHeight: 400, overflowY: "auto" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "200px 70px 1fr 50px", gap: 8, padding: "6px 10px", background: C.surface, fontFamily: mno, fontSize: 10, fontWeight: 600, color: C.textSec, borderBottom: `1px solid ${C.border}` }}>
+                  <span>Key</span><span style={{ textAlign: "right" }}>大小</span><span>内容</span><span></span>
+                </div>
+                {diagnosis.map(d => {
+                  const expanded = !!scanExpanded[d.key];
+                  return (
+                    <div key={d.key} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "200px 70px 1fr 50px", gap: 8, padding: "5px 10px", fontFamily: mno, fontSize: 11, color: C.text }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.key}</span>
+                        <span style={{ textAlign: "right", color: C.textDim }}>{fmtSize(d.size)}</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.textSec }}>{d.summary}</span>
+                        <button onClick={() => setScanExpanded(prev => { const n = { ...prev }; if (expanded) delete n[d.key]; else n[d.key] = true; return n; })} style={{ fontFamily: mno, fontSize: 9, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 4, padding: "1px 6px", cursor: "pointer" }}>{expanded ? "收起" : "展开"}</button>
+                      </div>
+                      {expanded && (
+                        <div style={{ background: C.surface, padding: "8px 12px", fontFamily: mno, fontSize: 10, color: C.text, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 280, overflowY: "auto", borderTop: `1px solid ${C.border}` }}>
+                          {(() => {
+                            const v = localStorage.getItem(d.key) || "";
+                            try {
+                              const parsed = JSON.parse(v);
+                              return JSON.stringify(parsed, null, 2).slice(0, 5000) + (v.length > 5000 ? "\n…（超过 5000 字符已截断）" : "");
+                            } catch {
+                              return v.slice(0, 5000) + (v.length > 5000 ? "\n…（超过 5000 字符已截断）" : "");
+                            }
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {diagnosis.length === 0 && <div style={{ padding: "20px", textAlign: "center", fontFamily: mno, fontSize: 11, color: C.textDim }}>localStorage 完全空白</div>}
+            </div>
+          )}
+        </div>
+
+        {msg && <div style={{ fontFamily: mno, fontSize: 11, color: msg.startsWith("✓") ? C.accent : "#c0392b", padding: "6px 0", borderTop: `1px solid ${C.border}` }}>{msg}</div>}
+      </div>
+
+      {/* 恢复预览模态 */}
+      {previewData && (
+        <div style={{ position: "absolute", inset: 0, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.4)" }}>
+          <div style={{ width: "min(560px,90vw)", maxHeight: "80vh", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <h4 style={{ fontFamily: srf, fontSize: 16, fontWeight: 600, margin: 0 }}>恢复预览：{previewData.name}</h4>
+            <div style={{ fontFamily: mno, fontSize: 11, color: C.textDim }}>备份时间：{new Date(previewData.payload.ts).toLocaleString()}</div>
+            <div style={{ fontFamily: mno, fontSize: 11, color: C.text, background: C.surface, padding: "10px 12px", borderRadius: 6, maxHeight: 280, overflowY: "auto" }}>
+              {Object.entries(previewData.payload.data || {}).map(([k, v]) => {
+                let summary = "";
+                try { const p = JSON.parse(v); summary = Array.isArray(p) ? `${p.length} 条` : (p && typeof p === "object" ? `${Object.keys(p).length} 键` : String(p).slice(0, 40)); }
+                catch { summary = String(v).slice(0, 40); }
+                return <div key={k} style={{ padding: "2px 0" }}><b>{k}</b> · {summary}</div>;
+              })}
+            </div>
+            <div style={{ fontFamily: mno, fontSize: 10, color: C.textDim, lineHeight: 1.6 }}>
+              恢复模式：<b>智能合并</b>（保留你现有的，从备份补充缺失的；评分以现有为准，已读/批注/单集取并集）
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button onClick={() => setPreviewData(null)} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 16px", cursor: "pointer" }}>取消</button>
+              <button onClick={confirmRestore} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 16px", cursor: "pointer", fontWeight: 500 }}>确认恢复</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Correction Modal ───
+// 用户更正一个词时弹出：原词 → 输入正确写法 → 自动分类 → 预览本集所有同样的错误处 → 确认应用
+// 应用后：
+//   1. 写入 BP_RATING_DB.addCorrection(epId) 触发 summary/transcript 重新渲染
+//   2. POST 到本地 daemon /correction（如果在线）→ daemon 写进 vocabulary.json 的 user_added
+//   3. 自动批量 fix 同集所有相同 occurrence
+function CorrectionModal({ epId, original, location, summaryText, transcriptSegments, onClose, onApplied }) {
+  const [corrected, setCorrected] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const inputRef = useRef(null);
+  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 50); }, []);
+
+  // 自动分类
+  const classification = useMemo(() => bpClassifyCorrection(corrected), [corrected]);
+
+  // 统计本集 summary + transcript 里 original 出现的次数
+  const occurrences = useMemo(() => {
+    const inSummary = summaryText ? bpCountOccurrences(summaryText, original) : 0;
+    const inTranscript = (transcriptSegments || []).reduce((sum, s) => sum + bpCountOccurrences(s.text || "", original), 0);
+    return { inSummary, inTranscript, total: inSummary + inTranscript };
+  }, [original, summaryText, transcriptSegments]);
+
+  const canSubmit = !!corrected && corrected.trim() !== original.trim() && !submitting;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    const item = {
+      original: original.trim(),
+      corrected: corrected.trim(),
+      type: classification.type,
+      is_proper_noun: classification.isProperNoun,
+      location, // "summary" | "transcript"
+      applied_count: occurrences.total,
+    };
+    BP_RATING_DB.addCorrection(epId, item);
+    // POST to daemon (best-effort，离线也无所谓——本地 corrections 已存)
+    try {
+      await fetch("http://127.0.0.1:9878/correction", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...item, ep_id: epId }),
+      });
+    } catch {}
+    onApplied?.(item);
+    onClose();
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeIn .15s ease" }}>
+      <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)" }} />
+      <div style={{ position: "relative", width: "min(540px,94vw)", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "18px 22px", animation: "scaleIn .2s ease", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ fontFamily: srf, fontSize: 16, fontWeight: 600, color: C.text, margin: 0 }}>更正词汇</h3>
+          <button onClick={onClose} style={{ fontFamily: mno, fontSize: 14, color: C.textDim, background: "none", border: "none", cursor: "pointer", padding: 0 }}>✕</button>
+        </div>
+
+        {/* 原词 → 正确词 */}
+        <div>
+          <label style={{ fontFamily: mno, fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>原文</label>
+          <div style={{ fontFamily: srf, fontSize: 14, color: C.text, padding: "6px 10px", background: "#fff5e6", border: "1px solid #f0d294", borderRadius: 5 }}>{original}</div>
+        </div>
+        <div>
+          <label style={{ fontFamily: mno, fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>正确写法</label>
+          <input ref={inputRef} value={corrected} onChange={e => setCorrected(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && canSubmit) submit(); }}
+            placeholder="输入正确的写法…"
+            style={{ fontFamily: srf, fontSize: 14, color: C.text, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 5, padding: "6px 10px", outline: "none", width: "100%", boxSizing: "border-box" }} />
+        </div>
+
+        {/* 自动分类 */}
+        {corrected && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: mno, fontSize: 11 }}>
+            <span style={{ color: C.textDim }}>识别为:</span>
+            <span style={{
+              padding: "2px 8px", borderRadius: 10,
+              color: classification.isProperNoun ? C.bg : C.textSec,
+              background: classification.isProperNoun ? C.accent : C.surface,
+              border: `1px solid ${classification.isProperNoun ? C.accent : C.border}`,
+              fontWeight: 600,
+            }}>{classification.label}</span>
+            {classification.isProperNoun && <span style={{ fontSize: 10, color: C.textDim }}>· 将自动加入名词库（下次转录优先用这个拼写）</span>}
+          </div>
+        )}
+
+        {/* 同集 occurrence 预览 */}
+        {corrected && occurrences.total > 0 && (
+          <div style={{ background: "#fef9ed", border: "1px solid #f0d294", borderRadius: 6, padding: "10px 12px", fontFamily: mno, fontSize: 11, color: "#7a4f0f", lineHeight: 1.6 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>本集还发现 {occurrences.total} 处相同的「{original}」：</div>
+            <div style={{ paddingLeft: 4 }}>
+              · 总结里 <b>{occurrences.inSummary}</b> 处<br/>
+              · 转录里 <b>{occurrences.inTranscript}</b> 处<br/>
+            </div>
+            <div style={{ marginTop: 6, color: "#9a6e1d" }}>提交后 <b>全部一并修正</b>。</div>
+          </div>
+        )}
+        {corrected && occurrences.total === 0 && (
+          <div style={{ fontFamily: mno, fontSize: 10, color: C.textDim, padding: "4px 0" }}>本集没有其他相同 occurrence，仅这一处更正。</div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+          <button onClick={onClose} style={{ fontFamily: mno, fontSize: 11, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 16px", cursor: "pointer" }}>取消</button>
+          <button disabled={!canSubmit} onClick={submit} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: "#b45309", border: "none", borderRadius: 6, padding: "6px 16px", cursor: canSubmit ? "pointer" : "not-allowed", fontWeight: 500, opacity: canSubmit ? 1 : .5 }}>{submitting ? "保存中…" : `✎ 应用更正${occurrences.total > 0 ? ` (${occurrences.total + 1})` : ""}`}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ───
+function BlogPulse() {
+  const [channels, setChannels] = useState([]);
+  const [episodes, setEpisodes] = useState([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showAddEpisode, setShowAddEpisode] = useState(false);
+  const [showBackup, setShowBackup] = useState(false);
+  const [pendingEpisodes, setPendingEpisodes] = useState(() => BP_RATING_DB.getPendingEpisodes());
+  const [detailEp, setDetailEp] = useState(null);
+  const [showChannels, setShowChannels] = useState(false);
+  const [selectedChannelId, setSelectedChannelId] = useState(null); // null = 全部，否则只显示该频道
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [showDebug, setShowDebug] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const [, fu] = useState(0);
+  const chRef = useRef([]);
+  const epRef = useRef([]);
+
+  // ─── URL 路由（hash-based，静态托管友好）───
+  // #/                       → 主页（剧集列表）
+  // #/episode/{episode_id}   → 单集详情
+  // #/channels               → 追踪频道页
+  // 每集都有独立的可分享 URL；浏览器返回按钮天然工作
+  const writeHash = useCallback((target) => {
+    if (window.location.hash !== target) {
+      // 直接赋 hash 会触发 hashchange，applyRoute 会同步状态
+      window.location.hash = target;
+    }
+  }, []);
+  const navToEpisode = useCallback((ep) => {
+    // 立即更新 state（避免等 hashchange 的细微闪烁），同时写 hash
+    setDetailEp(ep);
+    if (ep) setShowChannels(false);
+    writeHash(ep ? "#/episode/" + encodeURIComponent(ep._id) : "#/");
+  }, [writeHash]);
+  const navToChannels = useCallback((show) => {
+    setShowChannels(show);
+    if (show) setDetailEp(null);
+    writeHash(show ? "#/channels" : "#/");
+  }, [writeHash]);
+
+  // 监听浏览器返回/前进/手输地址 → 同步 state
+  const applyRoute = useCallback(() => {
+    const h = (window.location.hash || "").replace(/^#\/?/, "");
+    if (h.startsWith("episode/")) {
+      const id = decodeURIComponent(h.slice("episode/".length));
+      const ep = epRef.current.find(e => e._id === id);
+      if (ep) {
+        setDetailEp(ep);
+        setShowChannels(false);
+      } else if (epRef.current.length > 0) {
+        // episodes 已加载但找不到该 id → 回主页（链接失效）
+        setDetailEp(null);
+        // 不修改 hash — 让用户看到"找不到"再决定
+      }
+      // episodes 还没加载完时不动，等下面那个 effect 再 applyRoute
+    } else if (h === "channels") {
+      setDetailEp(null);
+      setShowChannels(true);
+    } else {
+      setDetailEp(null);
+      setShowChannels(false);
+    }
+  }, []);
+  // 跨电脑同步：fetch 部署的 user_data_sync.json → smart-merge 进本地 localStorage
+  // 这样 A 电脑改的批注/评分/已读，B/C 电脑刷新就能看到（30-60s 延迟，等 Cloudflare 部署）
+  useEffect(() => {
+    let stopped = false;
+    const SYNC_KEYS_FLAT = ["bp_user_ratings", "bp_reads", "bp_learned_weights"];
+    const SYNC_KEYS_LIST_BY_ID = ["bp_annotations", "bp_corrections"];  // {epId: [items], dedup by id/key}
+    const parseOr = (s, def) => { try { return JSON.parse(s || "null") || def; } catch { return def; } };
+
+    const syncFromCloud = async () => {
+      try {
+        // Prefer KV-backed /api/user-data (instant, <100ms write→read);
+        // fall back to static user_data_sync.json (daemon-pushed via git, ~30s lag).
+        // Note: ABSOLUTE path '/api/user-data' — relative './api/user-data' would
+        // resolve to '/blogpulse/api/user-data' which doesn't exist as a Function
+        // and triggers the Pages SPA fallback (returns Dashboard Hub HTML),
+        // causing the JSON parse below to fail and the fallback never to run.
+        let r;
+        let payloadOk = false;
+        try {
+          r = await fetch(`/api/user-data?bust=${Date.now()}`);
+          if (!r.ok) throw new Error(`api ${r.status}`);
+          const ct = r.headers.get('content-type') || '';
+          if (!ct.includes('json')) throw new Error(`api wrong content-type: ${ct}`);
+          payloadOk = true;
+        } catch (e) {
+          // Try static file as fallback
+          r = await fetch(`./user_data_sync.json?bust=${Date.now()}`);
+          if (!r.ok) return;
+        }
+        const payload = await r.json();
+        if (stopped) return;
+        const remote = payload?.data || {};
+        if (!remote || !Object.keys(remote).length) return;
+        let changed = 0;
+        // ratings / reads / learned_weights: flat dict, remote 补缺（local 已有的不覆盖，避免本地最新被旧远程覆盖）
+        for (const k of SYNC_KEYS_FLAT) {
+          const local = parseOr(localStorage.getItem(k), {});
+          const remoteObj = parseOr(remote[k], {});
+          const merged = { ...remoteObj, ...local };  // local wins
+          if (JSON.stringify(merged) !== JSON.stringify(local)) {
+            localStorage.setItem(k, JSON.stringify(merged));
+            changed++;
+          }
+        }
+        // pending_episodes: array, 按 episode_id 并集
+        {
+          const local = parseOr(localStorage.getItem("bp_pending_episodes"), []);
+          const remoteArr = parseOr(remote["bp_pending_episodes"], []);
+          const seen = new Set(local.map(p => p.episode_id));
+          const extras = remoteArr.filter(p => !seen.has(p.episode_id));
+          if (extras.length) {
+            localStorage.setItem("bp_pending_episodes", JSON.stringify([...local, ...extras]));
+            changed++;
+          }
+        }
+        // annotations: {epId: [items]}, dedup by id
+        {
+          const local = parseOr(localStorage.getItem("bp_annotations"), {});
+          const remoteObj = parseOr(remote["bp_annotations"], {});
+          const merged = { ...local };
+          let added = 0;
+          for (const [epId, list] of Object.entries(remoteObj)) {
+            const localList = merged[epId] || [];
+            const seen = new Set(localList.map(x => x.id));
+            const extra = list.filter(x => !seen.has(x.id));
+            if (extra.length) { merged[epId] = [...localList, ...extra]; added += extra.length; }
+            else if (!merged[epId]) merged[epId] = list;
+          }
+          if (added) { localStorage.setItem("bp_annotations", JSON.stringify(merged)); changed++; }
+        }
+        // corrections: {epId: [items]}, dedup by (original, corrected)
+        {
+          const local = parseOr(localStorage.getItem("bp_corrections"), {});
+          const remoteObj = parseOr(remote["bp_corrections"], {});
+          const merged = { ...local };
+          let added = 0;
+          for (const [epId, list] of Object.entries(remoteObj)) {
+            const localList = merged[epId] || [];
+            const seen = new Set(localList.map(x => `${x.original}→${x.corrected}`));
+            const extra = list.filter(x => !seen.has(`${x.original}→${x.corrected}`));
+            if (extra.length) { merged[epId] = [...localList, ...extra]; added += extra.length; }
+            else if (!merged[epId]) merged[epId] = list;
+          }
+          if (added) { localStorage.setItem("bp_corrections", JSON.stringify(merged)); changed++; }
+        }
+        // expansions: {epId: {chapter_key: data}}, latest ts wins
+        {
+          const local = parseOr(localStorage.getItem("bp_expansions"), {});
+          const remoteObj = parseOr(remote["bp_expansions"], {});
+          const merged = { ...local };
+          let added = 0;
+          for (const [epId, chapMap] of Object.entries(remoteObj)) {
+            if (!merged[epId]) { merged[epId] = chapMap; added++; continue; }
+            for (const [ch, data] of Object.entries(chapMap)) {
+              const a = merged[epId][ch];
+              if (!a) { merged[epId][ch] = data; added++; }
+              else if ((data.ts || 0) > (a.ts || 0)) { merged[epId][ch] = data; added++; }
+            }
+          }
+          if (added) { localStorage.setItem("bp_expansions", JSON.stringify(merged)); changed++; }
+        }
+        // bp_channel_actions: list of {id, type, status, payload, ts}
+        // 远端会把 status 推到 done/error；本地清理已完成且 expansion/channel 已就位的
+        {
+          const local = parseOr(localStorage.getItem("bp_channel_actions"), []);
+          const remoteArr = parseOr(remote["bp_channel_actions"], []);
+          const rank = { done: 3, error: 3, processing: 2, pending: 1 };
+          const map = {};
+          for (const x of [...local, ...remoteArr]) {
+            if (!x || !x.id) continue;
+            const cur = map[x.id];
+            if (!cur) { map[x.id] = x; continue; }
+            const a = rank[cur.status || "pending"] || 0;
+            const b = rank[x.status || "pending"] || 0;
+            if (b > a || (b === a && (x.ts||0) > (cur.ts||0))) map[x.id] = x;
+          }
+          // 清理 1 分钟以上的 done 动作（短保留期，避免 UI 闪烁）
+          const now = Date.now();
+          const merged = Object.values(map).filter(x => {
+            if (x.status === "done" && (now - (x.completed_at || x.ts || 0)) > 60000) return false;
+            if (x.status === "error" && (now - (x.completed_at || x.ts || 0)) > 86400000) return false;
+            return true;
+          });
+          if (JSON.stringify(merged) !== JSON.stringify(local)) {
+            localStorage.setItem("bp_channel_actions", JSON.stringify(merged));
+            changed++;
+          }
+        }
+        // expand_pending: {epId: {chapter_key: {status, ...}}}
+        // 主电脑 worker 处理完会把 status 改成 'done'/'error'；前端遇到 done 且 expansion 已就位 → 删掉 pending
+        {
+          const local = parseOr(localStorage.getItem("bp_expand_pending"), {});
+          const remoteObj = parseOr(remote["bp_expand_pending"], {});
+          const expansionsLocal = parseOr(localStorage.getItem("bp_expansions"), {});
+          const merged = { ...local };
+          let touched = 0;
+          // 用 remote 状态更新本地（status 升级 / 新加入）
+          for (const [epId, chapMap] of Object.entries(remoteObj)) {
+            if (!merged[epId]) merged[epId] = {};
+            for (const [ch, task] of Object.entries(chapMap)) {
+              const a = merged[epId][ch];
+              if (!a) { merged[epId][ch] = task; touched++; continue; }
+              // status 优先级 done/error > processing > pending；同 status 取新 ts
+              const rank = { done: 3, error: 3, processing: 2, pending: 1 };
+              const ar = rank[a.status || "pending"] || 0;
+              const br = rank[task.status || "pending"] || 0;
+              if (br > ar) { merged[epId][ch] = task; touched++; }
+              else if (br === ar && (task.requested_at || 0) > (a.requested_at || 0)) { merged[epId][ch] = task; touched++; }
+            }
+          }
+          // 清理：done 且 expansion 已就位 / error 任务保留 24h 后清理
+          const now = Date.now();
+          for (const [epId, chapMap] of Object.entries(merged)) {
+            for (const ch of Object.keys(chapMap)) {
+              const t = chapMap[ch];
+              if (t?.status === "done" && expansionsLocal[epId]?.[ch]) {
+                delete chapMap[ch]; touched++;
+              } else if (t?.status === "error" && (now - (t.errored_at || t.requested_at || 0)) > 86400000) {
+                delete chapMap[ch]; touched++;
+              }
+            }
+            if (!Object.keys(chapMap).length) delete merged[epId];
+          }
+          if (touched) { localStorage.setItem("bp_expand_pending", JSON.stringify(merged)); changed++; }
+        }
+        if (changed) {
+          fu(n => n + 1);  // 触发组件重渲染显示新合并的数据
+        }
+      } catch {}
+    };
+    syncFromCloud();  // 启动时立即拉一次
+    const t = setInterval(syncFromCloud, 60 * 1000);
+    return () => { stopped = true; clearInterval(t); };
+  }, []);
+
+  // 启动时同步 daemon 的 /retranscribe_jobs → 本地 bp_retranscribing
+  // 让"转录中"badge 在 dashboard 重启后还能正确显示
+  useEffect(() => {
+    let stopped = false;
+    const syncJobs = async () => {
+      let jobs = null;
+      let source = null;
+      // 1) 本机 daemon（最快、最准）— 仅在跑 daemon 的那台机器上能连上
+      try {
+        const r = await fetch("http://127.0.0.1:9878/retranscribe_jobs");
+        if (r.ok) { jobs = await r.json(); source = "daemon"; }
+      } catch {}
+      // 2) Fallback: 已部署的 retranscribe_active.json — 任何浏览器都能拿
+      //    daemon 在 spawn / 完成时会写这个文件 + git push，Cloudflare 部署后所有人可见
+      if (jobs === null) {
+        try {
+          const r = await fetch(`./retranscribe_active.json?bust=${Date.now()}`);
+          if (r.ok) {
+            const data = await r.json();
+            jobs = data.jobs || {};
+            source = "public";
+          }
+        } catch {}
+      }
+      if (jobs === null) return;
+      try {
+        if (stopped) return;
+        const localState = BP_RATING_DB._get("retranscribing", {});
+        const liveEpIds = new Set();
+        for (const [epId, info] of Object.entries(jobs)) {
+          // ep_id 在 daemon/json 里都没 preset- 前缀，dashboard 这边都是 preset-{ep_id}
+          const dashId = epId.startsWith("preset-") ? epId : `preset-${epId}`;
+          liveEpIds.add(dashId);
+          if (!localState[dashId] || localState[dashId].model !== info.model) {
+            BP_RATING_DB.setRetranscribing(dashId, { pid: info.pid, log: info.log, model: info.model || "gpt-4o-hybrid" });
+          }
+        }
+        // 清理：本地有但当前 source 显示已无的 epId
+        for (const k of Object.keys(localState)) {
+          if (!liveEpIds.has(k)) {
+            if (source === "public") {
+              // public JSON 是权威——daemon push 它的更新即代表 jobs 状态。立即清理
+              BP_RATING_DB.clearRetranscribing(k);
+            } else {
+              // daemon 源：留 5min 容忍期（应付 daemon 还没注册新 spawn 的瞬间）
+              const age = Date.now() - (localState[k].ts || 0);
+              if (age > 5 * 60 * 1000) BP_RATING_DB.clearRetranscribing(k);
+            }
+          }
+        }
+        fu(n => n + 1);  // 触发重渲染
+      } catch {}
+    };
+    syncJobs();  // 启动时跑一次
+    const t = setInterval(syncJobs, 60 * 1000);  // 每 60s 同步一次
+    return () => { stopped = true; clearInterval(t); };
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("hashchange", applyRoute);
+    return () => window.removeEventListener("hashchange", applyRoute);
+  }, [applyRoute]);
+
+  // 自动恢复检测：本地无 bp_ 用户数据 → 探测守护进程 latest.json → 提示用户恢复
+  // 只在第一次 mount 时检查，避免反复弹窗
+  const [restoreOffer, setRestoreOffer] = useState(null); // null | {payload, name}
+  useEffect(() => {
+    const hasUserData = !!localStorage.getItem("bp_user_ratings")
+                     || !!localStorage.getItem("bp_reads")
+                     || !!localStorage.getItem("bp_annotations");
+    if (hasUserData) return;
+    fetch("http://127.0.0.1:9878/backup?name=latest.json")
+      .then(r => r.ok ? r.json() : null)
+      .then(payload => {
+        if (!payload || !payload.data) return;
+        // 备份里有真东西才提示
+        const meaningful = ["bp_user_ratings", "bp_reads", "bp_annotations"].some(k => {
+          try { const v = JSON.parse(payload.data[k] || "null"); return v && (Array.isArray(v) ? v.length : Object.keys(v).length); }
+          catch { return false; }
+        });
+        if (meaningful) setRestoreOffer({ payload, name: "latest.json" });
+      })
+      .catch(() => {});
+  }, []);
+
+  const acceptRestore = () => {
+    if (!restoreOffer) return;
+    const r = BP_RATING_DB.importAll(restoreOffer.payload, "smart");
+    BP_BACKUP.flush();
+    showToast(`✓ 已从守护进程恢复 ${r.written} 个 key（${restoreOffer.name}）`, "success");
+    setRestoreOffer(null);
+    // 触发组件重新读取
+    setTimeout(() => window.location.reload(), 800);
+  };
+  const dismissRestore = () => setRestoreOffer(null);
+
+  // 在已存在 episodes 中清掉 pending — 一旦该单集真的进了 PRESET_EPISODES，状态视为 done
+  useEffect(() => {
+    if (!episodes.length || !pendingEpisodes.length) return;
+    const prefix = "preset-ep_";
+    const epIdSet = new Set(episodes.map(e => (e._id || "").replace(prefix, "")));
+    let changed = false;
+    const updated = pendingEpisodes.map(p => {
+      // pending.episode_id 是小宇宙 24-char eid；preset id 是 ep_{eid前8位}
+      const shortId = (p.episode_id || "").slice(0, 8);
+      const matched = [...epIdSet].some(id => id.startsWith(shortId));
+      if (matched && p.status !== "done") { changed = true; return { ...p, status: "done" }; }
+      return p;
+    });
+    if (changed) {
+      BP_RATING_DB.savePendingEpisodes(updated);
+      setPendingEpisodes(updated);
+    }
+  }, [episodes, pendingEpisodes]);
+
+  useEffect(() => { chRef.current = channels; }, [channels]);
+  useEffect(() => { epRef.current = episodes; }, [episodes]);
+
+  const showToast = (m, t = "info") => { setToast({ m, t }); setTimeout(() => setToast(null), t === "error" ? 10000 : 5000); };
+
+  const save = useCallback(async (ch, ep) => {
+    try { await window.storage.set(STORE_KEY, JSON.stringify({ channels: ch, episodes: ep, lastRefresh: Date.now() })); } catch (e) { dlog(`存储失败: ${e.message}`); }
+  }, []);
+
+  // Load with presets
+  useEffect(() => {
+    (async () => {
+      let ch = [], ep = [];
+      try {
+        const r = await window.storage.get(STORE_KEY);
+        if (r?.value) { const d = JSON.parse(r.value); ch = d.channels || []; ep = d.episodes || []; setLastRefresh(d.lastRefresh); }
+      } catch {}
+      // 加载评分阈值 + 月度学到的 overrides（频道/关键词/嘉宾 bonus）
+      // 都由月度 scheduled task 按用户打分 + 批注自动校准
+      try {
+        const [tr, or] = await Promise.all([
+          fetch(`./rating_thresholds.json?bust=${Date.now()}`).catch(() => null),
+          fetch(`./learned_overrides.json?bust=${Date.now()}`).catch(() => null),
+        ]);
+        if (tr && tr.ok) {
+          const t = await tr.json(); window.BP_THRESHOLDS = t;
+          dlog(`thresholds: 3★≥${t.tier_3_min} 2★≥${t.tier_2_min} (${t.method})`);
+        }
+        if (or && or.ok) {
+          const o = await or.json(); window.BP_OVERRIDES = o;
+          const cb = Object.keys(o.channel_bonus || {}).length;
+          const kb = Object.keys(o.keyword_bonus || {}).length;
+          const gb = Object.keys(o.guest_bonus || {}).length;
+          dlog(`overrides: ${cb} 频道 + ${kb} 关键词 + ${gb} 嘉宾 bonus (${o.method})`);
+        }
+      } catch {}
+      // Ensure all preset channels exist (merge by id; user may have added extras)
+      for (const pc of PRESET_CHANNELS) {
+        if (!ch.find(c => c.id === pc.id)) ch.push(pc);
+      }
+      // 跨电脑同步：fetch 部署的 episodes_index.json，把未在 PRESET_EPISODES 里的集合当占位 episode 加进来
+      // 这样新发现但还没转录的集（如硅谷坐标 6 集）也能立刻显示在主页，标"待转录"
+      try {
+        const r = await fetch(`./episodes_index.json?bust=${Date.now()}`);
+        if (r.ok) {
+          const payload = await r.json();
+          const list = Array.isArray(payload?.episodes) ? payload.episodes : [];
+          for (const ri of list) {
+            if (!ri.preset_id) continue;
+            if (ep.find(e => e._id === ri.preset_id)) continue;  // 已经有完整 PRESET_EPISODE 数据
+            // 创建占位 episode：
+            const status = ri.has_summary ? "ready" : ri.has_transcript ? "transcribed_no_summary" : "pending";
+            ep.push({
+              _id: ri.preset_id,
+              _channelId: ri.channel_id ? `preset-${ri.channel_id}` : "",
+              _channelName: ri.channel_name || "",
+              _isPlaceholder: status !== "ready",
+              _status: status,
+              _hasTranscript: !!ri.has_transcript,
+              _hasSummary: !!ri.has_summary,
+              _fetchedAt: Date.now(),
+              _isNew: true,
+              title: ri.title || "(无标题)",
+              date: ri.date || "",
+              guests: [], guestBackgrounds: [], topics: [],
+              source_url: ri.source_url || "",
+              audio_url: ri.audio_url || "",
+              duration: ri.duration || 0,
+              briefSummary: status === "pending" ? "（待转录…）" : status === "transcribed_no_summary" ? "（已转录，等待总结）" : "",
+              detailedSummary: "",
+              transcriptSegments: [],
+            });
+          }
+        }
+      } catch {}
+
+      // 跨电脑同步：fetch 部署的 channels.json（daemon 推送的最新频道列表 + 默认转录模型设置）
+      // 这样在主电脑（daemon 在线）上加的频道、改的模型，副电脑刷新就能看到
+      try {
+        const r = await fetch(`./channels.json?bust=${Date.now()}`);
+        if (r.ok) {
+          const remote = await r.json();
+          if (Array.isArray(remote)) {
+            for (const rc of remote) {
+              const pid = rc.podcast_id || "";
+              const localId = `preset-${rc.id}`;
+              // 本地有就更新（merge 模型设置等），没有就新加
+              const existing = ch.find(c => c.id === localId || (c.url && c.url.includes(pid)));
+              if (existing) {
+                if (rc.default_transcribe_model && existing.default_transcribe_model !== rc.default_transcribe_model) {
+                  existing.default_transcribe_model = rc.default_transcribe_model;
+                }
+              } else if (pid) {
+                ch.push({
+                  id: localId, name: rc.name, type: rc.type || "podcast",
+                  description: "", url: rc.url || `https://www.xiaoyuzhoufm.com/podcast/${pid}`,
+                  host: "", updateFrequency: "每周", lastFetched: Date.now(),
+                  default_transcribe_model: rc.default_transcribe_model || "whisper",
+                });
+              }
+            }
+          }
+        }
+      } catch {}
+      // Ensure preset episodes (update if new version has more data)
+      const presetIds = new Set(PRESET_EPISODES.map(e => e._id));
+      // Always replace preset episodes with latest embedded version
+      ep = [...PRESET_EPISODES, ...ep.filter(e => !presetIds.has(e._id))];
+      // 按更新日期降序排列（最新在前）— 无视评分/阅读状态
+      ep.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+      chRef.current = ch; epRef.current = ep;
+      setChannels(ch); setEpisodes(ep);
+      save(ch, ep);
+      setLoading(false);
+      dlog(`加载完成: ${ch.length}个频道, ${ep.length}条内容`);
+      // episodes 已就绪，初始 hash 路由如果是 #/episode/xxx 现在能找到 episode 了
+      applyRoute();
+    })();
+  }, []);
+
+  const doRefresh = useCallback((id) => {
+    showToast("内容由后台自动刷新，新内容将在下次部署后显示", "info");
+  }, []);
+
+  const addChannel = async (channel) => {
+    const newCh = [...chRef.current, channel];
+    chRef.current = newCh; setChannels(newCh);
+    await save(newCh, epRef.current);
+    // 写云端动作队列：bp_channel_actions（主电脑 daemon 会处理：写 channels.json + 触发 pipeline backfill）
+    try {
+      const actions = JSON.parse(localStorage.getItem("bp_channel_actions") || "[]");
+      actions.push({
+        id: `addch_${channel.id}_${Date.now()}`, type: "add", status: "pending",
+        payload: { name: channel.name, url: channel.url, type: channel.type, default_transcribe_model: channel.default_transcribe_model || "whisper" },
+        ts: Date.now(),
+      });
+      localStorage.setItem("bp_channel_actions", JSON.stringify(actions));
+      try { BP_BACKUP.flush(); } catch {}
+    } catch {}
+    // 本机 daemon 在线就立即同步（秒级），不在线就等云端 worker（30-60s）
+    let daemonOk = false;
+    try { const probe = await fetch("http://127.0.0.1:9878/status"); daemonOk = probe.ok; } catch { daemonOk = false; }
+    if (daemonOk) {
+      try {
+        await fetch("http://127.0.0.1:9878/channels", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: channel.name, url: channel.url, id: channel.id, type: channel.type, default_transcribe_model: channel.default_transcribe_model || "whisper" }),
+        });
+        showToast(`✓ 已添加 ${channel.name}，已同步到后台，将自动拉取内容`, "success");
+        return;
+      } catch {}
+    }
+    showToast(`✓ ${channel.name} 已加入，主电脑 daemon 上线后会自动开始拉取（约 30-60 秒）`, "info");
+  };
+
+  const removeChannel = (id) => {
+    const ch = chRef.current.find(c => c.id === id);
+    const newCh = chRef.current.filter(c => c.id !== id);
+    const newEp = epRef.current.filter(e => e._channelId !== id);
+    chRef.current = newCh; epRef.current = newEp;
+    setChannels(newCh); setEpisodes(newEp); save(newCh, newEp);
+    // 写云端动作队列：bp_channel_actions
+    try {
+      const url = ch?.url || "";
+      const pidMatch = url.match(/podcast\/([a-f0-9]{24})/);
+      const actions = JSON.parse(localStorage.getItem("bp_channel_actions") || "[]");
+      actions.push({
+        id: `delch_${id}_${Date.now()}`, type: "remove", status: "pending",
+        payload: { channel_id: id.replace(/^preset-/, ""), podcast_id: pidMatch ? pidMatch[1] : "" },
+        ts: Date.now(),
+      });
+      localStorage.setItem("bp_channel_actions", JSON.stringify(actions));
+      try { BP_BACKUP.flush(); } catch {}
+    } catch {}
+  };
+
+  // 切换频道默认转录模型（whisper / gpt4o）— 任何电脑都能切，自动跨机生效
+  // 流程：本机 daemon 在线就直接调（秒级生效）；不在线就写云端动作队列，主电脑 daemon worker 拉去执行
+  const changeChannelModel = async (ch, nextModel) => {
+    const url = ch.url || "";
+    const pidMatch = url.match(/podcast\/([a-f0-9]{24})/);
+    const podcastId = pidMatch ? pidMatch[1] : "";
+    // 1) 本地 state 立即更新（让 UI 即时反馈）
+    const newCh = chRef.current.map(c => c.id === ch.id ? { ...c, default_transcribe_model: nextModel } : c);
+    chRef.current = newCh; setChannels(newCh); save(newCh, epRef.current);
+    // 2) 写云端动作队列：bp_channel_actions
+    //    主电脑 daemon worker 会拉这个去执行
+    try {
+      const actions = JSON.parse(localStorage.getItem("bp_channel_actions") || "[]");
+      const actionId = `chmodel_${podcastId}_${Date.now()}`;
+      actions.push({
+        id: actionId, type: "set_model", status: "pending",
+        payload: { channel_id: ch.id.replace(/^preset-/, ""), podcast_id: podcastId, model: nextModel },
+        ts: Date.now(),
+      });
+      localStorage.setItem("bp_channel_actions", JSON.stringify(actions));
+      try { BP_BACKUP.flush(); } catch {}
+    } catch {}
+    // 3) 本机 daemon 在线？直接秒级调，不必等云端 worker
+    let daemonOk = false;
+    try {
+      const probe = await fetch("http://127.0.0.1:9878/status", { method: "GET" });
+      daemonOk = probe.ok;
+    } catch { daemonOk = false; }
+    if (daemonOk) {
+      try {
+        const r = await fetch("http://127.0.0.1:9878/channel_model", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: ch.id.replace(/^preset-/, ""), podcast_id: podcastId, model: nextModel }),
+        });
+        if (r.ok) {
+          showToast(`✓ ${ch.name} 默认转录已切到 ${nextModel === "gpt4o" ? "GPT-4o（付费更准）" : "免费 Whisper"}`, "success");
+          return;
+        }
+      } catch {}
+    }
+    // 4) 本机 daemon 不在线 → 等主电脑 daemon worker 处理
+    showToast(`✓ ${ch.name} 模型切换请求已上传，主电脑 daemon 上线后会自动应用（约 30-60 秒）`, "info");
+  };
+
+  const addEpisode = (item, synced) => {
+    setPendingEpisodes(BP_RATING_DB.getPendingEpisodes());
+    if (synced) {
+      showToast(`✓ 已加入待处理队列，下次自动转录会处理`, "success");
+    } else {
+      showToast(`✓ 已记录到本地（守护进程未运行 · 启动后会自动同步）`, "info");
+    }
+  };
+
+  const requestOpenAIRetranscribe = async (ep) => {
+    if (!ep || !ep._id) return;
+    const epId = (ep._id || "").replace(/^preset-/, "");
+    const segCount = ep.transcriptSegments?.length || 0;
+    const audioMin = segCount > 0 ? Math.ceil(ep.transcriptSegments[ep.transcriptSegments.length - 1].start / 60) : 60;
+    const costEst = (audioMin * 0.006).toFixed(2);
+    const ok = window.confirm(
+      `用 OpenAI gpt-4o-transcribe 重新转录这一集？\n\n` +
+      `集：${ep.title}\n` +
+      `时长：约 ${audioMin} 分钟\n` +
+      `预计成本：$${costEst} USD（按 $0.006/min × ${audioMin} min）\n\n` +
+      `• 会嵌入名词库（已积累的 ${BP_RATING_DB ? Object.keys(BP_RATING_DB.getAllCorrections()).length : 0} 集更正 + 全局词汇）\n` +
+      `• 重转完会自动跑 Opus 4.7 校对 + 重写总结 + 部署\n` +
+      `• 整个过程预计 5-15 分钟，期间不影响你使用 dashboard\n\n` +
+      `继续？`
+    );
+    if (!ok) return;
+    // 失败时自动重试一次（防 daemon 重启等瞬态问题）
+    const tryPost = async () => {
+      const r = await fetch("http://127.0.0.1:9878/retranscribe_openai", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ep_id: epId }),
+      });
+      const data = await r.json().catch(() => ({}));
+      return { r, data };
+    };
+    let attempt = 0;
+    while (attempt < 2) {
+      try {
+        const { r, data } = await tryPost();
+        if (r.ok && data.ok) {
+          BP_RATING_DB.setRetranscribing(ep._id, { pid: data.pid, log: data.log });
+          showToast(`✓ 已加入 GPT-4o 重转队列（PID ${data.pid}）— 完成后自动部署`, "success");
+          // 触发 EpisodeCard 重渲染（badge 立即出现）
+          setTimeout(() => fu(n => n + 1), 100);
+          return;
+        }
+        showToast(`✗ daemon 拒绝请求：${data.error || `HTTP ${r.status}`}`, "error");
+        return;  // 真错（4xx/5xx），不重试
+      } catch (e) {
+        attempt++;
+        if (attempt < 2) {
+          // 第一次失败 → 等 2s 重试一次（应付 daemon 短暂重启）
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        showToast(`✗ 守护进程不可用（重试 2 次都失败）— 检查 daemon.pyw 是否在跑。错误: ${e.message || e}`, "error");
+        return;
+      }
+    }
+  };
+
+  const removePendingEpisode = (epId) => {
+    const list = BP_RATING_DB.removePendingEpisode(epId);
+    setPendingEpisodes(list);
+  };
+
+  if (detailEp) return (
+    <>
+      <style>{`@keyframes fadeIn{from{opacity:0}to{opacity:1}} @keyframes spin{to{transform:rotate(360deg)}} *{box-sizing:border-box}`}</style>
+      <DetailPage ep={detailEp} onBack={() => navToEpisode(null)} />
+    </>
+  );
+
+  if (showChannels) return (
+    <>
+      <style>{`@keyframes fadeIn{from{opacity:0}to{opacity:1}} @keyframes spin{to{transform:rotate(360deg)}} *{box-sizing:border-box}`}</style>
+      <ChannelsPage channels={channels} episodes={episodes} onBack={() => navToChannels(false)}
+        onRemove={removeChannel} onRefresh={doRefresh} onAdd={() => setShowAdd(true)} busyId={busyId} />
+      {showAdd && <AddModal onClose={() => setShowAdd(false)} onAdded={addChannel} />}
+      {toast && <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 2000, animation: "fadeIn .2s ease", fontFamily: mno, fontSize: 12, padding: "10px 20px", borderRadius: 10, maxWidth: "min(500px,90vw)", wordBreak: "break-word", color: toast.t === "error" ? C.red : toast.t === "success" ? C.accent : C.text, background: toast.t === "error" ? "rgba(240,96,96,.1)" : toast.t === "success" ? "rgba(184,240,96,.1)" : C.card, border: `1px solid ${toast.t === "error" ? "rgba(240,96,96,.2)" : toast.t === "success" ? "rgba(184,240,96,.2)" : C.border}`, boxShadow: "0 8px 32px rgba(0,0,0,.4)" }}>{toast.m}</div>}
+    </>
+  );
+
+  const transcribedCount = episodes.filter(e => e.transcriptSegments?.length > 0).length;
+  const totalCount = episodes.length;
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text }}>
+      <style>{`
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        @keyframes scaleIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+        @keyframes pulseRing{0%,100%{opacity:.25;transform:scale(1)}50%{opacity:0;transform:scale(2.2)}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        *{box-sizing:border-box}
+        ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}
+        input::placeholder{color:${C.textDim}}
+      `}</style>
+
+      <header style={{ borderBottom: `1px solid ${C.border}`, padding: "8px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 50, background: "rgba(255,255,255,.92)", backdropFilter: "blur(12px)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <h1 style={{ fontFamily: srf, fontSize: 18, fontWeight: 300, color: C.text, margin: 0 }}>Blog<span style={{ fontWeight: 600 }}>Pulse</span></h1>
+          {episodes.filter(e => e._isNew).length > 0 && <span style={{ fontFamily: mno, fontSize: 9, color: C.bg, background: C.accent, borderRadius: 8, padding: "0px 7px", fontWeight: 500 }}>{episodes.filter(e => e._isNew).length} 新</span>}
+          {transcribedCount > 0 && <span style={{ fontFamily: mno, fontSize: 9, color: C.accentDark }}>{transcribedCount}/{totalCount} 已转录</span>}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={() => setShowBackup(true)} title="数据备份与恢复 — 评分/批注/已读" style={{ fontFamily: mno, fontSize: 10, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>💾 备份</button>
+          <button onClick={() => navToChannels(true)} title="查看所有追踪频道" style={{ fontFamily: mno, fontSize: 10, color: C.textSec, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>📡 频道 · {channels.length}</button>
+          <button onClick={() => setShowAddEpisode(true)} title="添加单集（不 track 整个频道）" style={{ fontFamily: mno, fontSize: 10, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontWeight: 500, position: "relative" }}>
+            + 单集
+            {pendingEpisodes.filter(p => p.status === "pending").length > 0 && (
+              <span style={{ position: "absolute", top: -4, right: -4, fontSize: 8, color: C.bg, background: "#e08e3a", borderRadius: 8, padding: "1px 5px", fontWeight: 600, lineHeight: 1.4 }}>{pendingEpisodes.filter(p => p.status === "pending").length}</span>
+            )}
+          </button>
+          <button onClick={() => setShowAdd(true)} title="追踪整个频道（自动获取所有更新）" style={{ fontFamily: mno, fontSize: 10, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontWeight: 500 }}>+ 频道</button>
+        </div>
+      </header>
+
+      <main style={{ padding: "12px 24px", maxWidth: 960, margin: "0 auto", minHeight: "50vh" }}>
+        {/* 待处理单集队列 — 用户主动请求的、还没被 pipeline 处理的 episode */}
+        {pendingEpisodes.filter(p => p.status === "pending").length > 0 && (
+          <div style={{ marginBottom: 14, background: "#fef9ed", border: `1px solid #f0d294`, borderRadius: 8, padding: "10px 14px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <span style={{ fontFamily: mno, fontSize: 10, color: "#9a6e1d", fontWeight: 600 }}>⏳ 待处理单集 · {pendingEpisodes.filter(p => p.status === "pending").length}</span>
+              <span style={{ fontFamily: mno, fontSize: 9, color: "#a4894c" }}>下次自动转录会处理（也可以发链接给我手动加速）</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {pendingEpisodes.filter(p => p.status === "pending").slice(0, 5).map(p => (
+                <div key={p.episode_id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                  <a href={p.url} target="_blank" rel="noreferrer" style={{ fontFamily: mno, fontSize: 11, color: "#7a4f0f", textDecoration: "none", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {p.title || `episode ${p.episode_id.slice(0, 12)}…`}
+                  </a>
+                  <span style={{ fontFamily: mno, fontSize: 9, color: "#a4894c", flexShrink: 0 }}>{new Date(p.requested_at).toLocaleDateString()}</span>
+                  <button onClick={() => removePendingEpisode(p.episode_id)} title="取消请求" style={{ fontFamily: mno, fontSize: 11, color: "#a4894c", background: "none", border: "none", cursor: "pointer", padding: "0 4px" }}>✕</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* 频道筛选 chip — 默认"全部"，点单个频道则只看该频道；只在追踪了多于 1 个频道时显示 */}
+        {(() => {
+          if (loading || episodes.length === 0) return null;
+          // 统计每频道的剧集数
+          const counts = new Map();
+          for (const e of episodes) {
+            const id = e._channelId;
+            if (id) counts.set(id, (counts.get(id) || 0) + 1);
+          }
+          // 只显示有剧集的频道，按数量倒序
+          const visibleChannels = channels
+            .filter(c => counts.get(c.id) > 0)
+            .map(c => ({ ...c, count: counts.get(c.id) }))
+            .sort((a, b) => b.count - a.count);
+          if (visibleChannels.length < 2) return null; // 只有 1 个频道时筛选没意义
+          const chipStyle = (active) => ({
+            fontFamily: mno, fontSize: 10,
+            color: active ? C.bg : C.textSec,
+            background: active ? C.accent : C.surface,
+            border: `1px solid ${active ? C.accent : C.border}`,
+            borderRadius: 14,
+            padding: "4px 12px",
+            cursor: "pointer",
+            fontWeight: active ? 600 : 400,
+            whiteSpace: "nowrap",
+            transition: "all .12s",
+          });
+          return (
+            <div style={{ marginBottom: 12, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontFamily: mno, fontSize: 10, color: C.textDim, marginRight: 2 }}>筛选频道</span>
+              <button onClick={() => setSelectedChannelId(null)} style={chipStyle(selectedChannelId === null)}>
+                全部 · {episodes.length}
+              </button>
+              {visibleChannels.map(c => (
+                <button key={c.id} onClick={() => setSelectedChannelId(c.id)} style={chipStyle(selectedChannelId === c.id)} title={c.name}>
+                  {c.name} · {c.count}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+        {(() => {
+          if (loading) return <div style={{ textAlign: "center", padding: "40px 0" }}><Spinner size={20} /></div>;
+          if (episodes.length === 0) return <div style={{ textAlign: "center", padding: "40px 20px" }}><p style={{ fontFamily: mno, fontSize: 11, color: C.textDim }}>暂无内容</p></div>;
+          const filtered = selectedChannelId ? episodes.filter(e => e._channelId === selectedChannelId) : episodes;
+          if (filtered.length === 0) {
+            return <div style={{ textAlign: "center", padding: "40px 20px" }}>
+              <p style={{ fontFamily: mno, fontSize: 11, color: C.textDim }}>这个频道还没有内容</p>
+              <button onClick={() => setSelectedChannelId(null)} style={{ fontFamily: mno, fontSize: 10, color: C.accent, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 6, padding: "4px 12px", cursor: "pointer", marginTop: 8 }}>查看全部</button>
+            </div>;
+          }
+          return <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {filtered.map(ep => <EpisodeCard key={ep._id} ep={ep} onOpen={navToEpisode} onRetranscribeOpenAI={requestOpenAIRetranscribe} />)}
+          </div>;
+        })()}
+      </main>
+
+      {showAdd && <AddModal onClose={() => setShowAdd(false)} onAdded={addChannel} />}
+      {showAddEpisode && <AddEpisodeModal onClose={() => setShowAddEpisode(false)} onAdded={addEpisode} />}
+      {showBackup && <DataBackupModal onClose={() => setShowBackup(false)} />}
+
+      <button onClick={() => { setShowDebug(!showDebug); fu(n => n + 1); }} style={{ position: "fixed", bottom: 12, right: 12, zIndex: 2000, fontFamily: mno, fontSize: 9, color: C.textDim, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 8px", cursor: "pointer", opacity: .5 }}>{showDebug ? "隐藏" : "调试"}</button>
+      {showDebug && <div style={{ position: "fixed", bottom: 36, right: 12, zIndex: 1999, width: 400, maxHeight: 280, overflowY: "auto", background: "rgba(255,255,255,.97)", border: `1px solid ${C.border}`, borderRadius: 10, padding: 12 }}>
+        {logs.map((l, i) => <div key={i} style={{ fontFamily: mno, fontSize: 10, color: l.includes("✗") ? C.red : l.includes("✓ ") ? C.accent : C.textSec, padding: "2px 0", borderBottom: `1px solid ${C.border}`, wordBreak: "break-all", lineHeight: 1.4 }}>{l}</div>)}
+      </div>}
+
+      {toast && <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 2000, animation: "fadeIn .2s ease", fontFamily: mno, fontSize: 12, padding: "10px 20px", borderRadius: 10, maxWidth: "min(500px,90vw)", wordBreak: "break-word", color: toast.t === "error" ? C.red : toast.t === "success" ? C.accent : C.text, background: toast.t === "error" ? "rgba(240,96,96,.1)" : toast.t === "success" ? "rgba(184,240,96,.1)" : C.card, border: `1px solid ${toast.t === "error" ? "rgba(240,96,96,.2)" : toast.t === "success" ? "rgba(184,240,96,.2)" : C.border}`, boxShadow: "0 8px 32px rgba(0,0,0,.4)" }}>{toast.m}</div>}
+
+      {/* 自动检测：浏览器无用户数据但守护进程有备份 → 提示恢复 */}
+      {restoreOffer && (
+        <div style={{ position: "fixed", top: 60, left: "50%", transform: "translateX(-50%)", zIndex: 2100, width: "min(580px,94vw)", background: "#fef9ed", border: "1px solid #f0d294", borderRadius: 10, padding: "14px 18px", boxShadow: "0 8px 32px rgba(0,0,0,.18)", animation: "fadeIn .2s ease" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <span style={{ fontSize: 22 }}>💾</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: srf, fontSize: 14, fontWeight: 600, color: "#7a4f0f", marginBottom: 4 }}>检测到可恢复的备份</div>
+              <div style={{ fontFamily: mno, fontSize: 11, color: "#9a6e1d", lineHeight: 1.6, marginBottom: 8 }}>
+                这台浏览器没有评分/已读/批注数据，但本地守护进程文件夹里有一份备份（{new Date(restoreOffer.payload.ts).toLocaleString()}）。要不要恢复？
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={acceptRestore} style={{ fontFamily: mno, fontSize: 11, color: C.bg, background: C.accent, border: "none", borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 500 }}>恢复</button>
+                <button onClick={() => { setShowBackup(true); setRestoreOffer(null); }} style={{ fontFamily: mno, fontSize: 11, color: "#7a4f0f", background: "#fff", border: "1px solid #f0d294", borderRadius: 6, padding: "6px 14px", cursor: "pointer" }}>查看详情</button>
+                <button onClick={dismissRestore} style={{ fontFamily: mno, fontSize: 11, color: "#a4894c", background: "transparent", border: "none", padding: "6px 10px", cursor: "pointer" }}>跳过</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(BlogPulse));
+</script>
+</body>
+</html>
