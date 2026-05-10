@@ -1,1 +1,15 @@
-{"data":{}}
+{
+  "updated_at": "2026-05-10T23:55:15.742233",
+  "data": {
+    "bp_user_ratings": "{}",
+    "bp_reads": "{}",
+    "bp_learned_weights": "{}",
+    "bp_pending_episodes": "[]",
+    "bp_annotations": "{}",
+    "bp_corrections": "{}",
+    "bp_expansions": "{}",
+    "bp_expand_pending": "{}",
+    "bp_channel_actions": "[{\"id\": \"addch-test-1778428470\", \"type\": \"add\", \"status\": \"done\", \"payload\": {\"name\": \"����Ƶ��\", \"url\": \"https://www.xiaoyuzhoufm.com/podcast/626b46ea9cbbf0451cf5a962\", \"type\": \"podcast\"}, \"ts\": 1778428470000, \"completed_at\": 1778428499599}]",
+    "_test": "hello"
+  }
+}
