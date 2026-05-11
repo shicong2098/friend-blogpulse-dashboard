@@ -1584,7 +1584,7 @@ function DetailPage({ ep, onBack }) {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) { setPendingSelection(null); return; }
     const text = sel.toString().trim();
-    if (text.length < 3) { setPendingSelection(null); return; }
+    if (text.length < 2) { setPendingSelection(null); return; }
     if (summaryRef.current && sel.rangeCount > 0) {
       const range = sel.getRangeAt(0);
       if (summaryRef.current.contains(range.commonAncestorContainer)) {
