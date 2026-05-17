@@ -213,7 +213,7 @@ const BP_BACKUP = {
     // 2) 发送到 daemon (本机) + Cloudflare /api/backup (跨机持久化、移动端可用)
     const payload = JSON.stringify({ data: snapshot, ts });
     try {
-      fetch("http://127.0.0.1:9878/backup", {
+      fetch("http://127.0.0.1:9879/backup", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: payload,
       }).catch(() => {});
@@ -1483,14 +1483,14 @@ function DetailPage({ ep, onBack }) {
     // 1) 探测本机 daemon
     let daemonOk = false;
     try {
-      const probe = await fetch("http://127.0.0.1:9878/status", { method: "GET" });
+      const probe = await fetch("http://127.0.0.1:9879/status", { method: "GET" });
       daemonOk = probe.ok;
     } catch { daemonOk = false; }
 
     if (daemonOk) {
       // 本机 daemon 可用：直接调
       try {
-        const r = await fetch("http://127.0.0.1:9878/expand_section", {
+        const r = await fetch("http://127.0.0.1:9879/expand_section", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ep_id: ep._id.replace(/^preset-/, ""),
@@ -1751,9 +1751,9 @@ function ChannelsPage({ channels, episodes, onBack, onRemove, onRefresh, onAdd, 
   // 朋友版：月度付费转录预算显示（每月 $10 上限，每月 1 号自动 reset）
   const [budget, setBudget] = React.useState(null);
   React.useEffect(() => {
-    fetch("http://127.0.0.1:9878/budget_status").then(r => r.json()).then(setBudget).catch(() => setBudget(null));
+    fetch("http://127.0.0.1:9879/budget_status").then(r => r.json()).then(setBudget).catch(() => setBudget(null));
     const t = setInterval(() => {
-      fetch("http://127.0.0.1:9878/budget_status").then(r => r.json()).then(setBudget).catch(() => {});
+      fetch("http://127.0.0.1:9879/budget_status").then(r => r.json()).then(setBudget).catch(() => {});
     }, 60000);
     return () => clearInterval(t);
   }, []);
@@ -1912,7 +1912,7 @@ function AddModal({ onClose, onAdded }) {
 // 增加单集（不 track 整个频道）— 粘贴小宇宙 episode 链接 / 在 xyzrank 单集榜里搜索
 // 提交后：
 //   1) 写入 localStorage `bp_pending_episodes`（用户可见、可重发）
-//   2) POST 到本地守护进程 http://127.0.0.1:9878/episode（写入 pending_episodes.json）
+//   2) POST 到本地守护进程 http://127.0.0.1:9879/episode（写入 pending_episodes.json）
 //   3) 下次 pipeline 跑时会处理这些待办单集
 //
 // 数据源：
@@ -1998,7 +1998,7 @@ function AddEpisodeModal({ onClose, onAdded }) {
         .catch(e => { setCatalogError(String(e)); setCatalogLoading(false); });
     }
     if (daemonAvailable === null) {
-      fetch("http://127.0.0.1:9878/status").then(r => r.ok).catch(() => false)
+      fetch("http://127.0.0.1:9879/status").then(r => r.ok).catch(() => false)
         .then(ok => setDaemonAvailable(!!ok));
     }
   }, [tab, episodeCatalog, catalogLoading, daemonAvailable]);
@@ -2014,7 +2014,7 @@ function AddEpisodeModal({ onClose, onAdded }) {
       setDaemonSearching(true);
       // 优先本机 daemon（更快），失败/不可用 → 云端 /api/search_episodes
       const tryUrls = daemonAvailable
-        ? [`http://127.0.0.1:9878/search_episodes?q=${encodeURIComponent(query.trim())}`,
+        ? [`http://127.0.0.1:9879/search_episodes?q=${encodeURIComponent(query.trim())}`,
            `/api/search_episodes?q=${encodeURIComponent(query.trim())}`]
         : [`/api/search_episodes?q=${encodeURIComponent(query.trim())}`];
       for (const u of tryUrls) {
@@ -2087,7 +2087,7 @@ function AddEpisodeModal({ onClose, onAdded }) {
     BP_RATING_DB.addPendingEpisode(item);
     let synced = false;
     try {
-      const r = await fetch("http://127.0.0.1:9878/episode", {
+      const r = await fetch("http://127.0.0.1:9879/episode", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(item),
       });
@@ -2227,8 +2227,8 @@ function DataBackupModal({ onClose }) {
   useEffect(() => { refresh(); }, []);
   useEffect(() => {
     if (tab !== "daemon" || daemonBackups !== null) return;
-    fetch("http://127.0.0.1:9878/status").then(r => r.json()).then(s => setDaemonStatus(s)).catch(() => setDaemonStatus(null));
-    fetch("http://127.0.0.1:9878/backups").then(r => r.json()).then(d => setDaemonBackups(Array.isArray(d) ? d : [])).catch(() => setDaemonBackups([]));
+    fetch("http://127.0.0.1:9879/status").then(r => r.json()).then(s => setDaemonStatus(s)).catch(() => setDaemonStatus(null));
+    fetch("http://127.0.0.1:9879/backups").then(r => r.json()).then(d => setDaemonBackups(Array.isArray(d) ? d : [])).catch(() => setDaemonBackups([]));
   }, [tab, daemonBackups]);
 
   const handleExport = () => {
@@ -2260,7 +2260,7 @@ function DataBackupModal({ onClose }) {
   const handleRestoreFromDaemon = async (name, mode) => {
     setBusy(true);
     try {
-      const r = await fetch(`http://127.0.0.1:9878/backup?name=${encodeURIComponent(name)}`);
+      const r = await fetch(`http://127.0.0.1:9879/backup?name=${encodeURIComponent(name)}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const payload = await r.json();
       setPreviewData({ name, payload, mode });
@@ -2342,7 +2342,7 @@ function DataBackupModal({ onClose }) {
                 snapshot_*.json（每小时一份）保留 1 年。
                 因为每份是 *完整快照*，你现存的笔记永远都在最新的 daily 文件里。
               </p>
-              {daemonStatus === null && <div style={{ fontFamily: mno, fontSize: 11, color: "#c0392b", padding: "12px 0" }}>⚠️ 无法连接守护进程（http://127.0.0.1:9878）— 请确认 daemon.pyw 在跑</div>}
+              {daemonStatus === null && <div style={{ fontFamily: mno, fontSize: 11, color: "#c0392b", padding: "12px 0" }}>⚠️ 无法连接守护进程（http://127.0.0.1:9879）— 请确认 daemon.pyw 在跑</div>}
               {daemonStatus && daemonBackups !== null && (
                 <>
                   <div style={{ fontFamily: mno, fontSize: 10, color: C.accent, marginBottom: 10 }}>✓ 守护进程在线 · 备份文件夹有 {daemonBackups.length} 份</div>
@@ -2530,7 +2530,7 @@ function CorrectionModal({ epId, original, location, summaryText, transcriptSegm
     BP_RATING_DB.addCorrection(epId, item);
     // POST to daemon (best-effort，离线也无所谓——本地 corrections 已存)
     try {
-      await fetch("http://127.0.0.1:9878/correction", {
+      await fetch("http://127.0.0.1:9879/correction", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...item, ep_id: epId }),
       });
@@ -2850,7 +2850,7 @@ function BlogPulse() {
       let source = null;
       // 1) 本机 daemon（最快、最准）— 仅在跑 daemon 的那台机器上能连上
       try {
-        const r = await fetch("http://127.0.0.1:9878/retranscribe_jobs");
+        const r = await fetch("http://127.0.0.1:9879/retranscribe_jobs");
         if (r.ok) { jobs = await r.json(); source = "daemon"; }
       } catch {}
       // 2) Fallback: 已部署的 retranscribe_active.json — 任何浏览器都能拿
@@ -2912,7 +2912,7 @@ function BlogPulse() {
                      || !!localStorage.getItem("bp_reads")
                      || !!localStorage.getItem("bp_annotations");
     if (hasUserData) return;
-    fetch("http://127.0.0.1:9878/backup?name=latest.json")
+    fetch("http://127.0.0.1:9879/backup?name=latest.json")
       .then(r => r.ok ? r.json() : null)
       .then(payload => {
         if (!payload || !payload.data) return;
@@ -3097,10 +3097,10 @@ function BlogPulse() {
     } catch {}
     // 本机 daemon 在线就立即同步（秒级），不在线就等云端 worker（30-60s）
     let daemonOk = false;
-    try { const probe = await fetch("http://127.0.0.1:9878/status"); daemonOk = probe.ok; } catch { daemonOk = false; }
+    try { const probe = await fetch("http://127.0.0.1:9879/status"); daemonOk = probe.ok; } catch { daemonOk = false; }
     if (daemonOk) {
       try {
-        await fetch("http://127.0.0.1:9878/channels", {
+        await fetch("http://127.0.0.1:9879/channels", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: channel.name, url: channel.url, id: channel.id, type: channel.type, default_transcribe_model: channel.default_transcribe_model || "whisper" }),
         });
@@ -3157,12 +3157,12 @@ function BlogPulse() {
     // 3) 本机 daemon 在线？直接秒级调，不必等云端 worker
     let daemonOk = false;
     try {
-      const probe = await fetch("http://127.0.0.1:9878/status", { method: "GET" });
+      const probe = await fetch("http://127.0.0.1:9879/status", { method: "GET" });
       daemonOk = probe.ok;
     } catch { daemonOk = false; }
     if (daemonOk) {
       try {
-        const r = await fetch("http://127.0.0.1:9878/channel_model", {
+        const r = await fetch("http://127.0.0.1:9879/channel_model", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: ch.id.replace(/^preset-/, ""), podcast_id: podcastId, model: nextModel }),
         });
@@ -3204,7 +3204,7 @@ function BlogPulse() {
     if (!ok) return;
     // 失败时自动重试一次（防 daemon 重启等瞬态问题）
     const tryPost = async () => {
-      const r = await fetch("http://127.0.0.1:9878/retranscribe_openai", {
+      const r = await fetch("http://127.0.0.1:9879/retranscribe_openai", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ep_id: epId }),
       });
